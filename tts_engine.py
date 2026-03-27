@@ -1,6 +1,42 @@
-"""TTS Engine v3 — Edge TTS with sentence-level units, rate/pitch per character, overlap prevention."""
+"""TTS Engine v3 — Edge TTS with sentence-level units, rate/pitch per character, overlap prevention.
+Fixed for Google Colab/Jupyter compatibility (nested event loop support).
+"""
 import os, json, logging, asyncio, subprocess
 logger = logging.getLogger(__name__)
+
+# Fix for Google Colab / Jupyter — they already have a running event loop
+# asyncio.run() fails with "This event loop is already running"
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+    logger.info("[TTS] nest_asyncio applied (Colab/Jupyter compatible)")
+except ImportError:
+    # Install it on the fly if missing
+    try:
+        subprocess.run(["pip", "install", "nest_asyncio"], capture_output=True, timeout=30)
+        import nest_asyncio
+        nest_asyncio.apply()
+        logger.info("[TTS] nest_asyncio installed and applied")
+    except Exception:
+        logger.warning("[TTS] nest_asyncio not available — may fail in Colab/Jupyter")
+
+def _run_async(coro):
+    """Run an async coroutine, compatible with both Colab and normal Python."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're in Colab/Jupyter — nest_asyncio should handle this
+            return loop.run_until_complete(coro)
+        else:
+            return asyncio.run(coro)
+    except RuntimeError:
+        # Fallback: create a new loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
 # Rate/pitch variation per role for voice differentiation
 ROLE_STYLES = {
@@ -68,12 +104,12 @@ def generate(segments, cast_map, work_dir, target_lang="Hindi"):
 
         # Generate TTS with timeout
         try:
-            asyncio.run(asyncio.wait_for(_gen_async(text, voice, rate, pitch, raw), timeout=15.0))
+            _run_async(asyncio.wait_for(_gen_async(text, voice, rate, pitch, raw), timeout=15.0))
         except Exception as e:
             logger.warning(f"[TTS] seg {seg_id} with rate/pitch failed ({e}), retrying plain...")
             try:
                 import edge_tts
-                asyncio.run(asyncio.wait_for(edge_tts.Communicate(text, voice).save(raw), timeout=15.0))
+                _run_async(asyncio.wait_for(edge_tts.Communicate(text, voice).save(raw), timeout=15.0))
             except Exception as e2:
                 logger.error(f"[TTS] seg {seg_id} failed: {e2}")
                 continue
