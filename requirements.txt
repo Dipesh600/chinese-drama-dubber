@@ -1,5 +1,13 @@
-groq>=0.11.0
-edge-tts>=6.1.0
-yt-dlp>=2024.1.0
-indic-transliteration>=2.3.0
-nest-asyncio>=1.5.0
+# Core Dependencies — Chinese Drama Dubber v5.0
+yt-dlp
+groq
+edge-tts
+nest-asyncio
+httpx
+
+# Audio Processing
+demucs          # Meta's vocal/music separator
+torchaudio      # Required by Demucs
+
+# Utilities
+unidecode       # Romanization
