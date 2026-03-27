@@ -1,13 +1,13 @@
 """
-VOICE CATALOG v1 — Smart voice matching system.
-Uses Fish Audio's 2M+ voice library to find the best native-sounding voice
-for each character in the target language. No Chinese voice cloning — instead,
-picks voices that sound authentically Indian/regional for Hindi dubbing, etc.
+VOICE CATALOG v2 — Smart voice matching for LOCAL Fish Speech inference.
+Matches character profiles to native-sounding regional voices. No Chinese
+voice cloning — picks voices that sound authentically Indian/regional.
 
 Architecture:
 1. Curated regional voice catalog with metadata (age, gender, tone, personality)
-2. LLM-powered matching: Director's character profile → best voice from catalog
-3. Fish Audio API for TTS generation with selected voice reference
+2. Score-based matching: Director's character profile → best voice from catalog
+3. Fish Speech LOCAL on Colab GPU (no API key, no cloud)
+4. Edge TTS fallback if Fish Speech not available
 """
 import os, json, logging
 logger = logging.getLogger(__name__)

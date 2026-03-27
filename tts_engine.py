@@ -1,16 +1,17 @@
 """
-TTS ENGINE v4 — Fish Audio + Edge TTS with intelligent fallback.
-Features:
-- Fish Audio API for high-quality, emotional TTS (2M+ voices)
-- Edge TTS as reliable fallback (no API key needed)
-- Emotion-aware generation using segment mood data
-- Smart speed matching to original segment duration
-- Colab/Jupyter compatible (nest_asyncio)
+TTS ENGINE v5 — LOCAL Fish Speech on Colab GPU + Edge TTS fallback.
+NO API KEYS NEEDED. Fish Speech runs on the T4 GPU directly.
+
+Architecture:
+1. Fish Speech local server on localhost:8080 (start in Colab notebook)
+2. Edge TTS as reliable fallback (no GPU, no key)
+3. Emotion-aware generation using segment mood data
+4. Smart speed matching to original segment duration
 """
-import os, json, logging, asyncio, subprocess, time, hashlib
+import os, json, logging, asyncio, subprocess, time
 logger = logging.getLogger(__name__)
 
-# Fix for Google Colab — already has a running event loop
+# Fix for Google Colab event loop
 try:
     import nest_asyncio
     nest_asyncio.apply()
@@ -40,80 +41,104 @@ def _run_async(coro):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# FISH AUDIO TTS
+# FISH SPEECH LOCAL (runs on Colab T4 GPU — no API key!)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _fish_audio_generate(text, voice_ref_id, output_path, emotion=None):
+FISH_LOCAL_URL = "http://localhost:8080"
+
+def _check_fish_server():
+    """Check if Fish Speech local server is running."""
+    try:
+        import httpx
+        r = httpx.get(f"{FISH_LOCAL_URL}/", timeout=2.0)
+        return r.status_code < 500
+    except Exception:
+        return False
+
+_fish_available = None  # Cached check
+
+def _is_fish_available():
+    """Check Fish Speech availability (cached)."""
+    global _fish_available
+    if _fish_available is None:
+        _fish_available = _check_fish_server()
+    return _fish_available
+
+
+def _fish_local_generate(text, output_path, emotion=None, reference_audio=None):
     """
-    Generate TTS using Fish Audio API.
-    
+    Generate TTS using Fish Speech running LOCALLY on Colab GPU.
+    No API key needed — the model runs on the T4.
+
     Args:
         text: Text to speak
-        voice_ref_id: Fish Audio model/voice reference ID
-        output_path: Path to save the generated audio
-        emotion: Optional emotion tag (happy, sad, angry, etc.)
+        output_path: Where to save the audio
+        emotion: Optional mood tag (happy, sad, angry, etc.)
+        reference_audio: Optional reference audio path for voice style
     
     Returns:
         True if successful, False otherwise
     """
-    api_key = os.environ.get("FISH_AUDIO_API_KEY", "")
-    if not api_key:
-        return False
-    
     try:
         import httpx
     except ImportError:
-        try:
-            subprocess.run(["pip", "install", "httpx"], capture_output=True, timeout=30)
-            import httpx
-        except Exception:
-            return False
-    
-    # Add emotion markers if available
+        return False
+
+    if not _is_fish_available():
+        return False
+
+    # Add emotion/prosody hints if available
     if emotion and emotion != "neutral":
-        emotion_map = {
+        emotion_prefix = {
             "happy": "(happily) ", "excited": "(excitedly) ",
             "sad": "(sadly) ", "emotional": "(emotionally) ",
-            "angry": "(angrily) ", "tense": "(tensely) ",
+            "angry": "(angrily) ", "tense": "(in a tense voice) ",
             "wise": "(wisely) ", "gentle": "(gently) ",
             "urgent": "(urgently) ", "fearful": "(fearfully) ",
+            "romantic": "(romantically) ", "humorous": "(humorously) ",
         }
-        prefix = emotion_map.get(emotion, "")
+        prefix = emotion_prefix.get(emotion, "")
         text = prefix + text
-    
+
     try:
-        url = "https://api.fish.audio/v1/tts"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        # Build request for the local Fish Speech server
         payload = {
             "text": text,
-            "reference_id": voice_ref_id,
-            "format": "mp3",
-            "latency": "normal",
+            "format": "wav",
+            "streaming": False,
         }
-        
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(url, json=payload, headers=headers)
-            
+
+        # If a reference audio is provided (for voice style/cloning)
+        if reference_audio and os.path.exists(reference_audio):
+            import base64
+            with open(reference_audio, "rb") as f:
+                audio_b64 = base64.b64encode(f.read()).decode()
+            payload["references"] = [{"audio": audio_b64, "text": ""}]
+
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(
+                f"{FISH_LOCAL_URL}/v1/tts",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+
             if response.status_code == 200:
                 with open(output_path, "wb") as f:
                     f.write(response.content)
                 return True
             else:
-                logger.warning(f"[TTS-FISH] API error {response.status_code}: {response.text[:100]}")
+                logger.debug(f"[TTS-FISH] Local server returned {response.status_code}")
                 return False
+
     except Exception as e:
-        logger.warning(f"[TTS-FISH] Request failed: {e}")
+        logger.debug(f"[TTS-FISH] Local inference failed: {e}")
         return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# EDGE TTS (FALLBACK)
+# EDGE TTS (FALLBACK — always works, no GPU needed)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Rate/pitch variation per role for Edge TTS voice differentiation
 EDGE_ROLE_STYLES = {
     "NARRATOR":    {"rate": "+5%",  "pitch": "+0Hz"},
     "FATHER":      {"rate": "-5%",  "pitch": "-10Hz"},
@@ -167,77 +192,70 @@ def generate(segments, cast_map, work_dir, target_lang="Hindi",
              voice_catalog_map=None, use_fish_audio=True):
     """
     Generate TTS clips for all segments.
-    
-    Architecture:
-    1. Try Fish Audio API (if API key available + voice catalog mapped)
-    2. Fall back to Edge TTS (always available, no API key)
-    3. Speed-adjust clips to match original timing
-    4. Trim clips to prevent overlap with next segment
-    
+
+    Priority:
+    1. Fish Speech LOCAL (runs on Colab T4 GPU — no API key)
+    2. Edge TTS fallback (cloud, always works)
+
     Args:
         segments: TTS segments with text, timing, speaker, mood
-        cast_map: Either voice_catalog entries (v2) or Edge TTS voice strings (v1)
+        cast_map: Edge TTS voice strings for fallback
         work_dir: Working directory for output
         target_lang: Target language
-        voice_catalog_map: Optional mapping from voice_catalog.match_voices()
-        use_fish_audio: Whether to try Fish Audio first
-    
-    Returns:
-        dict with manifest of generated clips
+        voice_catalog_map: Optional voice catalog entries
+        use_fish_audio: Whether to try Fish Speech local first
     """
     tts_dir = os.path.join(work_dir, "tts_clips")
     os.makedirs(tts_dir, exist_ok=True)
-    
+
     manifest = []
-    fish_audio_available = bool(os.environ.get("FISH_AUDIO_API_KEY"))
+    fish_local_ok = use_fish_audio and _is_fish_available()
     fish_used = 0
     edge_used = 0
     failed = 0
-    
-    if use_fish_audio and fish_audio_available:
-        logger.info(f"[TTS] 🐟 Fish Audio API available — high quality mode")
+
+    if fish_local_ok:
+        logger.info(f"[TTS] 🐟 Fish Speech LOCAL server detected — running on GPU!")
+        logger.info(f"[TTS] 🐟 No API key needed. High quality mode.")
     else:
-        logger.info(f"[TTS] Using Edge TTS (fallback mode)")
-    
+        if use_fish_audio:
+            logger.info(f"[TTS] ⚠ Fish Speech server not found at {FISH_LOCAL_URL}")
+            logger.info(f"[TTS] 💡 To enable: run the Fish Speech setup cell in the notebook")
+        logger.info(f"[TTS] 🔊 Using Edge TTS (fallback mode)")
+
     for idx, seg in enumerate(segments):
         seg_id = seg.get("id", idx)
         text = seg.get("dubbed_text", seg.get("text", "")).strip()
         speaker = seg.get("speaker", "NARRATOR")
         mood = seg.get("mood", "neutral")
-        
+
         if not text:
             continue
-        
+
         t_start = seg["start"]
         t_end = seg["end"]
         t_dur = t_end - t_start
-        
-        # Calculate max allowed duration (prevent overlap)
+
+        # Calculate max allowed duration
         max_win = t_dur
         if idx + 1 < len(segments):
             gap = segments[idx + 1]["start"] - t_end
             max_win = t_dur + min(gap * 0.6, 1.0)
         else:
             max_win = t_dur + 2.0
-        
+
         raw = os.path.join(tts_dir, f"s{seg_id:05d}_raw.mp3")
         wav = os.path.join(tts_dir, f"s{seg_id:05d}.wav")
-        
-        # ── Step 1: Try Fish Audio ──────────────────────────────
+
+        # ── Step 1: Try Fish Speech LOCAL ───────────────────────
         generated = False
-        
-        if use_fish_audio and fish_audio_available and voice_catalog_map:
-            voice_entry = voice_catalog_map.get(speaker, voice_catalog_map.get("NARRATOR"))
-            if voice_entry:
-                from voice_catalog import get_fish_ref
-                fish_ref = get_fish_ref(voice_entry, target_lang)
-                
-                if fish_ref:
-                    success = _fish_audio_generate(text, fish_ref, raw, emotion=mood)
-                    if success and os.path.exists(raw) and os.path.getsize(raw) > 100:
-                        generated = True
-                        fish_used += 1
-        
+
+        if fish_local_ok:
+            success = _fish_local_generate(text, raw, emotion=mood)
+            if success and os.path.exists(raw) and os.path.getsize(raw) > 100:
+                generated = True
+                fish_used += 1
+
         # ── Step 2: Edge TTS Fallback ───────────────────────────
         if not generated:
             # Get Edge TTS voice
@@ -248,10 +266,10 @@ def generate(segments, cast_map, work_dir, target_lang="Hindi",
                 voice = cast_map.get(speaker, cast_map.get("NARRATOR", "hi-IN-MadhurNeural"))
             else:
                 voice = "hi-IN-MadhurNeural"
-            
+
             style = EDGE_ROLE_STYLES.get(speaker, {"rate": "+0%", "pitch": "+0Hz"})
             rate, pitch = style["rate"], style["pitch"]
-            
+
             try:
                 _run_async(asyncio.wait_for(
                     _edge_tts_generate(text, voice, rate, pitch, raw), timeout=15.0
@@ -260,7 +278,7 @@ def generate(segments, cast_map, work_dir, target_lang="Hindi",
                     generated = True
                     edge_used += 1
             except Exception as e:
-                logger.warning(f"[TTS] seg {seg_id} Edge TTS with style failed ({e}), retrying plain...")
+                logger.warning(f"[TTS] seg {seg_id} Edge TTS failed ({e}), retrying plain...")
                 try:
                     import edge_tts
                     _run_async(asyncio.wait_for(
@@ -271,32 +289,32 @@ def generate(segments, cast_map, work_dir, target_lang="Hindi",
                         edge_used += 1
                 except Exception as e2:
                     logger.error(f"[TTS] seg {seg_id} completely failed: {e2}")
-        
+
         if not generated:
             failed += 1
             continue
-        
+
         # ── Step 3: Speed Adjust + Trim ─────────────────────────
         actual = _get_dur(raw)
         if actual <= 0:
             failed += 1
             continue
-        
+
         speed = max(0.82, min(1.3, actual / max(t_dur, 0.1)))
         adj = actual / speed
         trim = f",atrim=end={max_win - 0.06:.3f}" if adj > max_win - 0.06 else ""
-        
+
         cmd = [
             "ffmpeg", "-y", "-i", raw,
             "-af", f"atempo={speed}{trim},afade=t=out:st={max(0, adj-0.08):.3f}:d=0.08",
             "-ar", "44100", "-ac", "1", wav
         ]
         subprocess.run(cmd, capture_output=True, timeout=30)
-        
+
         if not os.path.exists(wav) or os.path.getsize(wav) < 100:
             failed += 1
             continue
-        
+
         clip_dur = _get_dur(wav)
         manifest.append({
             "id": seg_id, "start": t_start, "end": t_end,
@@ -304,23 +322,23 @@ def generate(segments, cast_map, work_dir, target_lang="Hindi",
             "speaker": speaker, "mood": mood,
             "text": text, "clip_path": wav,
             "tts_group": seg.get("tts_group"),
-            "engine": "fish_audio" if generated and fish_used > edge_used else "edge_tts",
+            "engine": "fish_speech_local" if fish_used > edge_used else "edge_tts",
         })
-    
+
     # Save manifest
     mp = os.path.join(work_dir, "tts_manifest.json")
     with open(mp, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
-    
+
     logger.info(f"[TTS] {'━' * 50}")
     logger.info(f"[TTS] ✓ Generated: {len(manifest)}/{len(segments)} clips")
     if fish_used > 0:
-        logger.info(f"[TTS] 🐟 Fish Audio: {fish_used} clips (high quality)")
+        logger.info(f"[TTS] 🐟 Fish Speech LOCAL: {fish_used} clips (GPU, no API key)")
     if edge_used > 0:
-        logger.info(f"[TTS] 🔊 Edge TTS:   {edge_used} clips (fallback)")
+        logger.info(f"[TTS] 🔊 Edge TTS:          {edge_used} clips (fallback)")
     if failed > 0:
-        logger.warning(f"[TTS] ❌ Failed:     {failed} clips")
+        logger.warning(f"[TTS] ❌ Failed:            {failed} clips")
     logger.info(f"[TTS] {'━' * 50}")
-    
+
     return {"manifest": manifest, "manifest_path": mp,
             "fish_used": fish_used, "edge_used": edge_used, "failed": failed}

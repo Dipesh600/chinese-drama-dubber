@@ -54,7 +54,16 @@ class DubberV5:
     
     def run(self):
         t0 = time.time()
-        fish_available = bool(os.environ.get("FISH_AUDIO_API_KEY"))
+        
+        # Check Fish Speech LOCAL server (runs on Colab GPU, no API key)
+        fish_local = False
+        if self.use_fish_audio:
+            try:
+                import httpx
+                r = httpx.get("http://localhost:8080/", timeout=2.0)
+                fish_local = r.status_code < 500
+            except Exception:
+                pass
         
         log.info("=" * 70)
         log.info(f"  🎬 DUBBER v5.0 — Production Pipeline")
@@ -62,8 +71,7 @@ class DubberV5:
         log.info(f"  Source:      {self.source_lang}")
         log.info(f"  URL:         {self.url}")
         log.info(f"  BG Audio:    {'Demucs Separation + Smart Ducking' if self.use_demucs else 'Smart Ducking'}")
-        log.info(f"  TTS Engine:  {'Fish Audio (if key set)' if self.use_fish_audio else 'Edge TTS'}")
-        log.info(f"  Fish Audio:  {'✓ API key found' if fish_available else '✗ No key — using Edge TTS fallback'}")
+        log.info(f"  TTS Engine:  {'🐟 Fish Speech LOCAL (GPU, no API key)' if fish_local else '🔊 Edge TTS (fallback)'}")
         log.info("=" * 70)
         
         try:
