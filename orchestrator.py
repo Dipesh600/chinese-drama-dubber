@@ -81,8 +81,37 @@ class DubberV6:
                     "outtmpl": video_path,
                     "quiet": True, "no_warnings": True
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([self.url])
+                
+                # YouTube anti-bot: try cookie authentication
+                cookie_file = os.environ.get("COOKIE_FILE", "")
+                cookie_paths = [
+                    cookie_file,
+                    os.path.join(os.path.dirname(__file__), "cookies.txt"),
+                    "/content/cookies.txt",
+                    os.path.expanduser("~/cookies.txt"),
+                ]
+                for cp in cookie_paths:
+                    if cp and os.path.exists(cp):
+                        ydl_opts["cookiefile"] = cp
+                        log.info(f"[1/13] 🍪 Using cookies: {cp}")
+                        break
+                
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([self.url])
+                except Exception as dl_err:
+                    if "Sign in" in str(dl_err) or "bot" in str(dl_err).lower():
+                        log.error(
+                            "[1/13] ❌ YouTube blocked the download (anti-bot).\n"
+                            "       FIX: Export your YouTube cookies and upload cookies.txt\n"
+                            "       HOW:\n"
+                            "         1. Install browser extension: 'Get cookies.txt LOCALLY'\n"
+                            "         2. Go to youtube.com (make sure you're logged in)\n"
+                            "         3. Click the extension → Export cookies\n"
+                            "         4. Upload the cookies.txt file to Colab (/content/cookies.txt)\n"
+                            "         5. Re-run this cell"
+                        )
+                    raise
                 
                 subprocess.run([
                     "ffmpeg", "-y", "-i", video_path, "-vn", "-ar", "16000",
