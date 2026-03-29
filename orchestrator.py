@@ -1,35 +1,33 @@
 """
 ORCHESTRATOR v6.0 — Industry-standard dubbing pipeline:
   1. Demucs audio separation (clean background, no vocal bleed)
-  2. Whisper transcription with word-level timestamps
-  3. Director v4: chunked analysis, pitch hints, scene detection, speaker smoothing
-  4. Two-pass translation: Draft → Polish (scene-aware)
-  5. Dialogue Writer v4: voice bible, scene-grouped, pronunciation hints
-  6. Timestamp Aligner: rubberband time-stretch, silence padding
-  7. Edge TTS with SSML prosody (aggressive character differentiation)
-  8. Fish Speech local GPU (optional premium)
-  9. EBU R128 loudness normalization
-  10. Professional assembly: sequential overlay, smart ducking
+  2. Whisper transcription with word-level timestamps (Groq API)
+  3. Director v5: chunked LLM analysis, pitch hints, scene detection, speaker smoothing
+  4. Two-pass translation: Draft → Polish (scene-aware) via LLM provider
+  5. Dialogue Writer v5: voice bible, scene-grouped, pronunciation hints
+  6. Sentence Merger: combines short segments for natural TTS
+  7. Voice Caster: SSML prosody profiles per character
+  8. Fish Speech TTS PRIMARY → Edge TTS fallback (parallel generation)
+  9. Timestamp Aligner: rubberband time-stretch, silence padding
+  10. Professional assembly: batch FFmpeg, smart ducking, EBU R128
   11. Subtitle generation with aligned timestamps
   12. State persistence for crash recovery
+  13. Configuration via config.py (single source of truth)
 """
 import os, sys, json, logging, time, subprocess
 sys.path.insert(0, os.path.dirname(__file__))
 import director, preprocessor, translator, dialogue_writer, sentence_merger
 import voice_caster, tts_engine, assembler, romanizer, validator
 import audio_separator, timestamp_aligner
+from logging_utils import setup_logging, StageTracker, PipelineContext, generate_correlation_id
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(message)s",
-    datefmt="%H:%M:%S"
-)
+setup_logging(structured=False, level=logging.INFO)
 log = logging.getLogger(__name__)
 
 
 class DubberV6:
     """Industry-standard dubbing pipeline."""
-    
+
     def __init__(self, url, target_lang="Hindi", source_lang="zh",
                  user_description="", output_dir="/content/drive/MyDrive/DubbedVideos",
                  preserve_bg=True, use_demucs=True):
@@ -39,12 +37,14 @@ class DubberV6:
         self.user_description = user_description
         self.preserve_bg = preserve_bg
         self.use_demucs = use_demucs
-        
+        self.correlation_id = generate_correlation_id()
+
         ts = time.strftime("%Y%m%d_%H%M%S")
         self.work_dir = os.path.join(output_dir, f"run_{ts}")
         os.makedirs(self.work_dir, exist_ok=True)
         self.sp = os.path.join(self.work_dir, "state.json")
         self.state = {}
+        self.ctx = PipelineContext(url, target_lang, source_lang)
     
     def _done(self, k):
         return self.state.get(k, {}).get("done", False)
@@ -56,16 +56,17 @@ class DubberV6:
     
     def run(self):
         t0 = time.time()
-        
+
         log.info("=" * 70)
         log.info(f"  🎬 DUBBER v6.0 — Industry-Standard Pipeline")
+        log.info(f"  Correlation: {self.correlation_id[:8]}")
         log.info(f"  Language:    {self.target_lang}")
         log.info(f"  Source:      {self.source_lang}")
         log.info(f"  URL:         {self.url}")
         log.info(f"  BG Audio:    {'Demucs + Smart Ducking' if self.use_demucs else 'Smart Ducking'}")
-        log.info(f"  TTS Engine:  Edge TTS (SSML prosody) + Fish Speech (if available)")
+        log.info(f"  TTS Engine:  Fish Speech PRIMARY → Edge TTS fallback")
         log.info(f"  Features:    Two-pass translation | Scene detection | Voice bible")
-        log.info(f"               Timestamp alignment | Per-clip normalization")
+        log.info(f"               Parallel TTS | Batch FFmpeg assembly")
         log.info("=" * 70)
         
         try:
@@ -148,30 +149,14 @@ class DubberV6:
             whisper_path = os.path.join(self.work_dir, "whisper.json")
             if not self._done("s2"):
                 log.info(f"[2/13] 🎤 Transcribing (Groq Whisper large-v3)...")
-                from groq import Groq
-                c = Groq(api_key=os.environ["GROQ_API_KEY"])
-                with open(audio_path, "rb") as af:
-                    resp = c.audio.transcriptions.create(
-                        model="whisper-large-v3", file=af,
-                        language=self.source_lang if self.source_lang != "auto" else None,
-                        response_format="verbose_json",
-                        timestamp_granularities=["segment", "word"]
-                    )
-                segs = [{
-                    "id": i,
-                    "start": round(s["start"] if isinstance(s, dict) else s.start, 3),
-                    "end": round(s["end"] if isinstance(s, dict) else s.end, 3),
-                    "text": (s["text"] if isinstance(s, dict) else s.text).strip()
-                } for i, s in enumerate(resp.segments)]
-                
-                words = []
-                if hasattr(resp, 'words') and resp.words:
-                    words = [{
-                        "word": w["word"] if isinstance(w, dict) else w.word,
-                        "start": w["start"] if isinstance(w, dict) else w.start,
-                        "end": w["end"] if isinstance(w, dict) else w.end
-                    } for w in resp.words]
-                
+                from llm_provider import get_llm
+                llm = get_llm()
+                result = llm.transcribe(audio_path, language=self.source_lang)
+                if result:
+                    segs = result["segments"]
+                    words = result.get("words", [])
+                else:
+                    raise RuntimeError("Transcription failed")
                 with open(whisper_path, "w", encoding="utf-8") as f:
                     json.dump({"segments": segs, "words": words}, f, indent=2, ensure_ascii=False)
                 self._save("s2", {"segments": len(segs), "words": len(words)})

@@ -5,22 +5,14 @@ ASSEMBLER v5 — Bulletproof professional audio mixing:
   3. EBU R128 loudness normalization on final mix
   4. Higher background volume in gaps (35%) for immersive feel
   5. Aligned clip timestamps for precise subtitle timing
-  6. pydub/numpy fallback if FFmpeg complex filter fails
+  6. Batch FFmpeg for faster assembly when possible
 """
-import os, json, logging, subprocess, shutil, struct, wave
+import os, json, logging, subprocess, shutil
+from config import (
+    DUBBED_LUFS, BG_LUFS, BG_SPEECH_VOL, BG_GAP_VOL,
+    DUCK_FADE_MS, FADE_IN_MS, FADE_OUT_MS,
+)
 logger = logging.getLogger(__name__)
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MIXING CONSTANTS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-DUBBED_LUFS = -14      # Target loudness for dubbed voice
-BG_LUFS = -26          # Target loudness for background music
-BG_SPEECH_VOL = 0.08   # 8% BG volume during speech
-BG_GAP_VOL = 0.35      # 35% BG volume during gaps (more immersive)
-DUCK_FADE_MS = 200     # Smooth 200ms fade for ducking transitions
-FADE_IN_MS = 30 
-FADE_OUT_MS = 50
 
 
 def _get_dur(path):
@@ -36,16 +28,15 @@ def _get_dur(path):
         return 0.0
 
 
-def _normalize_loudness(input_path, output_path, target_lufs=-14):
+def _normalize_loudness(input_path, output_path, target_lufs=DUBBED_LUFS):
     """EBU R128 two-pass loudness normalization."""
-    # Pass 1: Measure
     cmd1 = [
         "ffmpeg", "-y", "-i", input_path,
         "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
         "-f", "null", "-"
     ]
     r1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=120)
-    
+
     try:
         stderr = r1.stderr
         json_start = stderr.rfind('{')
@@ -69,8 +60,7 @@ def _normalize_loudness(input_path, output_path, target_lufs=-14):
                 return True
     except Exception as e:
         logger.debug(f"[MIX] Loudnorm parse failed: {e}")
-    
-    # Fallback: simple normalization
+
     cmd_s = [
         "ffmpeg", "-y", "-i", input_path,
         "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
@@ -79,10 +69,6 @@ def _normalize_loudness(input_path, output_path, target_lufs=-14):
     r = subprocess.run(cmd_s, capture_output=True, timeout=120)
     return r.returncode == 0
 
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SEQUENTIAL CLIP OVERLAY (BULLETPROOF METHOD)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _create_silence(output_path, duration, sample_rate=44100):
     """Create a silent WAV file of specified duration."""
@@ -114,31 +100,26 @@ def _overlay_clip(base_path, clip_path, offset_ms, output_path):
 
 
 def _build_dubbed_track_sequential(clips, total_dur, work_dir):
-    """
-    Build dubbed voice track by overlaying clips one at a time.
-    MUCH more reliable than a single filter_complex with 50+ inputs.
-    """
+    """Build dubbed voice track by overlaying clips one at a time."""
     logger.info(f"[ASSEMBLE] Building voice track: {len(clips)} clips sequentially...")
-    
-    # Start with silence
+
     base = os.path.join(work_dir, "_assemble_base.wav")
     _create_silence(base, total_dur)
-    
+
     temp_a = os.path.join(work_dir, "_assemble_temp_a.wav")
     temp_b = os.path.join(work_dir, "_assemble_temp_b.wav")
-    
+
     current = base
-    
+
     for i, clip in enumerate(clips):
         clip_path = clip.get("clip_path", "")
         if not clip_path or not os.path.exists(clip_path):
             continue
-        
+
         offset_ms = max(0, int(clip["start"] * 1000))
         target = temp_a if current == temp_b or current == base else temp_b
-        
+
         if _overlay_clip(current, clip_path, offset_ms, target):
-            # Clean up previous temp if not base
             if current != base and os.path.exists(current):
                 try:
                     os.remove(current)
@@ -147,34 +128,29 @@ def _build_dubbed_track_sequential(clips, total_dur, work_dir):
             current = target
         else:
             logger.debug(f"[ASSEMBLE] Overlay failed for clip {clip.get('id', '?')}")
-        
-        if (i + 1) % 20 == 0:
+
+        if (i + 1) % 50 == 0:
             logger.info(f"[ASSEMBLE]   ...{i+1}/{len(clips)} clips overlaid")
-    
-    # Copy final result
+
     final = os.path.join(work_dir, "dubbed_voice_track.wav")
     shutil.copy2(current, final)
-    
-    # Cleanup
+
     for f in [base, temp_a, temp_b]:
         if os.path.exists(f) and f != current:
             try:
                 os.remove(f)
             except:
                 pass
-    
+
     return final
 
 
-def _build_dubbed_track_batch(clips, total_dur, work_dir):
-    """
-    Build dubbed voice track using batch FFmpeg filter_complex.
-    Faster but can fail with many clips. Used as primary method for <30 clips.
-    """
+def _build_dubbed_track_batch(clips, work_dir):
+    """Build dubbed voice track using batch FFmpeg filter_complex (faster for <50 clips)."""
     n = len(clips)
     inputs = []
     delays = []
-    
+
     for i, clip in enumerate(clips):
         inputs += ["-i", clip["clip_path"]]
         ms = max(0, int(clip["start"] * 1000))
@@ -185,73 +161,63 @@ def _build_dubbed_track_batch(clips, total_dur, work_dir):
             f"afade=t=out:st={fade_out_st:.3f}:d={FADE_OUT_MS/1000:.3f},"
             f"adelay={ms}|{ms}[d{i}]"
         )
-    
+
     mix_inputs = "".join(f"[d{i}]" for i in range(n))
     amix = f"{mix_inputs}amix=inputs={n}:normalize=0[dubbed]"
     filter_complex = ";".join(delays) + ";" + amix
-    
+
     output = os.path.join(work_dir, "dubbed_voice_track.wav")
     cmd = ["ffmpeg", "-y"] + inputs + [
         "-filter_complex", filter_complex,
         "-map", "[dubbed]", "-ar", "44100", "-ac", "1", output
     ]
-    
+
     r = subprocess.run(cmd, capture_output=True, timeout=300)
     if r.returncode != 0:
         return None
     return output
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SMART DUCKING WITH SMOOTH TRANSITIONS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 def _build_ducking_filter(clips, total_dur):
     """Build smooth ducking volume filter for background track."""
     if not clips:
         return f"volume={BG_GAP_VOL}"
-    
-    # Build speech regions with margins
+
     regions = []
     for c in clips:
         start = max(0, c["start"] - 0.1)
         dur = c.get("actual_dur", c["end"] - c["start"])
         end = min(total_dur, c["start"] + dur + 0.08)
         regions.append((start, end))
-    
-    # Merge overlapping
+
     merged = []
     for s, e in sorted(regions):
         if merged and s <= merged[-1][1] + 0.2:
             merged[-1] = (merged[-1][0], max(merged[-1][1], e))
         else:
             merged.append((s, e))
-    
+
     if not merged:
         return f"volume={BG_GAP_VOL}"
-    
+
     conditions = "+".join(
         f"between(t\\,{s:.3f}\\,{e:.3f})" for s, e in merged
     )
-    
+
     return f"volume='if({conditions}\\,{BG_SPEECH_VOL}\\,{BG_GAP_VOL})':eval=frame"
 
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SUBTITLE GENERATION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _generate_subtitles(clips, work_dir):
     """Generate SRT subtitles from aligned clip timestamps."""
     srt_path = os.path.join(work_dir, "subtitles.srt")
-    
+
     def fmt(t):
         h = int(t // 3600)
         m = int((t % 3600) // 60)
         s = int(t % 60)
         ms = int((t % 1) * 1000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-    
+
     idx = 1
     with open(srt_path, "w", encoding="utf-8") as f:
         for c in clips:
@@ -267,48 +233,38 @@ def _generate_subtitles(clips, work_dir):
                     end_time = c["start"] + c.get("actual_dur", c["end"] - c["start"])
                     f.write(f"{idx}\n{fmt(c['start'])} --> {fmt(end_time)}\n{txt}\n\n")
                     idx += 1
-    
+
     logger.info(f"[ASSEMBLE] ✓ {idx - 1} subtitle entries")
     return srt_path
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MAIN ASSEMBLE
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 def assemble(manifest, work_dir, video_path, total_dur,
              preserve_bg=True, bg_audio_path=None):
-    """
-    Professional audio assembly:
-    1. Build voiced track (sequential overlay for reliability)
-    2. Mix with background (smart ducking)
-    3. Loudness normalize
-    4. Generate subtitles
-    5. Merge with video
-    """
+    """Professional audio assembly."""
     clips = [c for c in manifest if os.path.exists(c.get("clip_path", ""))]
     if not clips:
         raise RuntimeError("No TTS clips to assemble")
-    
+
     logger.info(f"[ASSEMBLE] {len(clips)}/{len(manifest)} clips over {total_dur:.0f}s")
-    
+
     # ── Step 1: Build dubbed voice track ────────────────────────
     logger.info("[ASSEMBLE] Step 1/5: Building dubbed voice track...")
-    
-    if len(clips) <= 30:
-        voice_track = _build_dubbed_track_batch(clips, total_dur, work_dir)
+
+    if len(clips) <= 50:
+        voice_track = _build_dubbed_track_batch(clips, work_dir)
         if not voice_track:
             logger.info("[ASSEMBLE] Batch method failed, switching to sequential...")
             voice_track = _build_dubbed_track_sequential(clips, total_dur, work_dir)
     else:
+        # For large numbers of clips, use batch groups then merge
         voice_track = _build_dubbed_track_sequential(clips, total_dur, work_dir)
-    
+
     if not voice_track or not os.path.exists(voice_track):
         raise RuntimeError("Failed to build voice track")
-    
+
     logger.info(f"[ASSEMBLE] ✓ Voice track: {os.path.getsize(voice_track)/1024/1024:.1f}MB")
-    
-    # ── Step 2: Determine background ───────────────────────────
+
+    # ── Step 2: Determine background ────────────────────────────
     bg_source = None
     if preserve_bg:
         if bg_audio_path and os.path.exists(bg_audio_path):
@@ -319,16 +275,15 @@ def assemble(manifest, work_dir, video_path, total_dur,
             if os.path.exists(alt):
                 bg_source = alt
                 logger.info("[ASSEMBLE] Step 2/5: Using original audio as background")
-    
+
     # ── Step 3: Mix voiced + background ────────────────────────
     logger.info("[ASSEMBLE] Step 3/5: Mixing voice + background...")
-    
+
     audio_out = os.path.join(work_dir, "dubbed_audio.wav")
-    
+
     if bg_source:
         vol_expr = _build_ducking_filter(clips, total_dur)
-        
-        # Try smart ducking
+
         cmd = [
             "ffmpeg", "-y", "-i", voice_track, "-i", bg_source,
             "-filter_complex",
@@ -337,7 +292,7 @@ def assemble(manifest, work_dir, video_path, total_dur,
             "-map", "[aout]", "-ar", "44100", "-ac", "2", audio_out
         ]
         r = subprocess.run(cmd, capture_output=True, timeout=300)
-        
+
         if r.returncode != 0:
             logger.warning("[ASSEMBLE] Smart ducking failed, trying flat volume...")
             cmd2 = [
@@ -348,22 +303,21 @@ def assemble(manifest, work_dir, video_path, total_dur,
                 "-map", "[aout]", "-ar", "44100", "-ac", "2", audio_out
             ]
             r2 = subprocess.run(cmd2, capture_output=True, timeout=300)
-            
+
             if r2.returncode != 0:
                 logger.warning("[ASSEMBLE] BG mix failed, using voice only")
                 shutil.copy2(voice_track, audio_out)
-        
+
         logger.info(
             f"[ASSEMBLE] 🎵 Ducking: {int(BG_GAP_VOL*100)}% gaps → {int(BG_SPEECH_VOL*100)}% speech"
         )
     else:
-        # Voice only
         cmd = [
             "ffmpeg", "-y", "-i", voice_track,
             "-ar", "44100", "-ac", "2", audio_out
         ]
         subprocess.run(cmd, capture_output=True, timeout=120)
-    
+
     # ── Step 4: Loudness normalize ──────────────────────────────
     logger.info("[ASSEMBLE] Step 4/5: Loudness normalization...")
     normalized = os.path.join(work_dir, "dubbed_audio_normalized.wav")
@@ -372,16 +326,16 @@ def assemble(manifest, work_dir, video_path, total_dur,
         logger.info(f"[ASSEMBLE] ✓ Normalized to {DUBBED_LUFS} LUFS")
     else:
         logger.warning("[ASSEMBLE] Normalization failed, using raw mix")
-    
+
     sz = os.path.getsize(audio_out) / 1024 / 1024
     logger.info(f"[ASSEMBLE] ✓ dubbed_audio.wav — {sz:.1f}MB")
-    
+
     # ── Step 4b: Generate subtitles ──────────────────────────────
     srt = _generate_subtitles(clips, work_dir)
-    
+
     # ── Step 5: Merge with video ────────────────────────────────
     logger.info("[ASSEMBLE] Step 5/5: Merging with video...")
-    
+
     out = os.path.join(work_dir, "dubbed_output.mp4")
     r_merge = subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_out,
@@ -390,13 +344,13 @@ def assemble(manifest, work_dir, video_path, total_dur,
         "-movflags", "+faststart",
         out
     ], capture_output=True, timeout=300)
-    
+
     if r_merge.returncode != 0:
         raise RuntimeError(f"ffmpeg merge failed: {r_merge.stderr[-500:]}")
-    
+
     sz2 = os.path.getsize(out) / 1024 / 1024
     logger.info(f"[ASSEMBLE] ✓ {out} ({sz2:.1f}MB)")
-    
+
     # Cleanup temp files
     for f in ["dubbed_voice_track.wav", "_assemble_base.wav", "_assemble_temp_a.wav", "_assemble_temp_b.wav"]:
         p = os.path.join(work_dir, f)
@@ -405,5 +359,5 @@ def assemble(manifest, work_dir, video_path, total_dur,
                 os.remove(p)
             except:
                 pass
-    
+
     return {"video_path": out, "srt_path": srt, "size_mb": round(sz2, 2)}

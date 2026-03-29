@@ -1,30 +1,20 @@
 """
-DIALOGUE WRITER v4 — Industry-grade script polishing:
+DIALOGUE WRITER v6 — Industry-grade script polishing using LLM provider:
   1. Character voice bible — defines HOW each character speaks
   2. Scene-grouped writing — writes per scene, not arbitrary batches
   3. Pronunciation hints for Edge TTS (commas, elongation, emphasis)
   4. Emotion-aware delivery markers
   5. Strict word budgeting with syllable awareness
-  6. llama-3.3-70b for quality
+  6. Async scene-based parallel processing
+  7. Uses config for shared settings
 """
 import os, json, logging, time
-from groq import Groq
+import asyncio
+from typing import List, Dict, Optional
+
+from config import get_wps, get_lang_instruction, TRANSLATOR_BATCH_SIZE
+from llm_provider import get_llm
 logger = logging.getLogger(__name__)
-_client = None
-
-def _gc():
-    global _client
-    if not _client:
-        _client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    return _client
-
-WORDS_PER_SEC = {
-    "Hindi": 2.5, "Tamil": 2.0, "Telugu": 2.2, "Bengali": 2.3,
-    "Marathi": 2.4, "Gujarati": 2.4, "Kannada": 2.1, "Malayalam": 1.9,
-    "Nepali": 2.5, "Urdu": 2.5, "English": 3.0, "Spanish": 2.8,
-    "French": 2.7, "Portuguese": 2.6, "German": 2.5, "Japanese": 3.5,
-    "Korean": 2.8, "Arabic": 2.5, "Turkish": 2.6,
-}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -32,12 +22,9 @@ WORDS_PER_SEC = {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _build_voice_bible(voice_plan, target_lang):
-    """
-    Build a 'voice bible' — specific instructions for how each character speaks.
-    This gets sent with EVERY writing batch for consistency.
-    """
+    """Build a 'voice bible' — specific instructions for how each character speaks."""
     bible = "CHARACTER VOICE BIBLE (MUST follow for every line):\n"
-    
+
     character_rules = {
         "NARRATOR": {
             "style": "Smooth, cinematic narration. Like a professional documentary narrator.",
@@ -110,19 +97,19 @@ def _build_voice_bible(voice_plan, target_lang):
             "donts": "cold detachment (unless plot requires)"
         },
     }
-    
+
     for v in voice_plan:
         vid = v.get("voice_id", "NARRATOR")
         rules = character_rules.get(vid, character_rules.get("NARRATOR"))
         personality = v.get("personality", "")
-        
+
         bible += f"\n  {vid} ({v.get('gender','?')}, {v.get('age','?')}):\n"
         bible += f"    Style: {rules['style']}\n"
         if personality:
             bible += f"    Personality: {personality}\n"
         bible += f"    DO: {rules['dos']}\n"
         bible += f"    DON'T: {rules['donts']}\n"
-    
+
     return bible
 
 
@@ -189,139 +176,176 @@ LANG_SPECIFIC = {
 }
 
 
-def _call_llm(prompt, msg, max_retries=4):
-    """Call LLM with retry and model fallback."""
-    c = _gc()
-    models = ["llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.1-8b-instant"]
-    
-    for mi, model in enumerate(models):
-        for attempt in range(max_retries if mi == 0 else 2):
-            try:
-                resp = c.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "system", "content": prompt}, {"role": "user", "content": msg}],
-                    temperature=0.3, max_tokens=4000,
-                    response_format={"type": "json_object"}
-                )
-                return json.loads(resp.choices[0].message.content), model
-            except Exception as e:
-                err = str(e)
-                if "429" in err or "rate" in err.lower():
-                    if mi < len(models) - 1:
-                        logger.warning(f"[WRITER] {model} rate limited → trying next model")
-                        break  # Try next model
-                    wait = min(2 ** attempt, 12)
-                    time.sleep(wait)
-                elif "model" in err.lower():
-                    logger.warning(f"[WRITER] {model} unavailable → trying next")
-                    break
-                else:
-                    wait = min(2 ** attempt, 8)
-                    time.sleep(wait)
-    return None, "none"
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ASYNC LLM CALLS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _call_llm_sync(prompt: str, message: str) -> Optional[Dict]:
+    """Synchronous wrapper for LLM call."""
+    llm = get_llm()
+    return llm.chat(prompt, message, temperature=0.3, max_tokens=4000, json_response=True)
+
+
+async def _call_llm_async(prompt: str, message: str) -> Optional[Dict]:
+    """Async wrapper using thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _call_llm_sync, prompt, message)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PARALLEL SCENE PROCESSING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def _rewrite_scene(
+    scene_id: int,
+    scene_name: str,
+    segments: List[Dict],
+    target_lang: str,
+    narrative_summary: str,
+    mood_arc: list,
+    voice_bible: str,
+    lang_spec: str,
+    wps: float,
+    char_examples: dict,
+) -> Dict:
+    """Rewrite a single scene's dialogue."""
+    logger.info(f"[WRITER] Scene {scene_name} ({len(segments)} segments)...")
+
+    prompt = WRITER_PROMPT.format(
+        target_lang=target_lang,
+        lang_specific=lang_spec,
+        voice_bible=voice_bible
+    )
+
+    # Build character consistency context
+    char_context = ""
+    if char_examples:
+        char_context = "\nCHARACTER VOICE EXAMPLES (maintain same style):\n"
+        for spk, examples in char_examples.items():
+            recent = examples[-2:]
+            for ex in recent:
+                char_context += f"  {spk} ({ex['mood']}): \"{ex['text'][:50]}\"\n"
+
+    items = [{
+        "id": s["id"],
+        "duration_sec": round(s["end"] - s["start"], 2),
+        "max_words": max(2, int((s["end"] - s["start"]) * wps)),
+        "speaker": s.get("speaker", "NARRATOR"),
+        "mood": s.get("mood", "neutral"),
+        "draft": s.get("dubbed_text", s.get("text", ""))
+    } for s in segments]
+
+    user_msg = f"""Story: {narrative_summary}
+Mood arc: {mood_arc or 'not specified'}
+{char_context}
+Rewrite these {len(items)} segments ({scene_name}). RESPECT max_words!
+{json.dumps(items, ensure_ascii=False)}"""
+
+    result = await _call_llm_async(prompt, user_msg)
+
+    if result:
+        seg_map = {s["id"]: s for s in segments}
+        for t in result.get("segments", []):
+            if t["id"] in seg_map:
+                new_text = t.get("dubbed_text", "")
+                if new_text:
+                    max_w = max(2, int((seg_map[t["id"]]["end"] - seg_map[t["id"]]["start"]) * wps))
+                    words = new_text.split()
+                    if len(words) > max_w + 2:
+                        new_text = " ".join(words[:max_w])
+                    seg_map[t["id"]]["dubbed_text"] = new_text
+
+                    # Track for character consistency
+                    speaker = seg_map[t["id"]].get("speaker", "NARRATOR")
+                    mood = seg_map[t["id"]].get("mood", "neutral")
+                    if speaker not in char_examples:
+                        char_examples[speaker] = []
+                    char_examples[speaker].append({"text": new_text, "mood": mood})
+
+        logger.info(f"[WRITER] Scene {scene_name} ✓")
+        return {"scene_id": scene_id, "segments": segments, "char_examples": char_examples}
+    else:
+        logger.warning(f"[WRITER] Scene {scene_name} — keeping draft translations")
+        return {"scene_id": scene_id, "segments": segments, "char_examples": char_examples}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MAIN REWRITE FUNCTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def rewrite(segments, work_dir, target_lang="Hindi", narrative_summary="", 
+def rewrite(segments, work_dir, target_lang="Hindi", narrative_summary="",
             mood_arc=None, voice_plan=None, scenes=None):
-    """
-    Scene-aware dialogue rewriting with character voice bible.
-    """
-    wps = WORDS_PER_SEC.get(target_lang, 2.5)
-    
+    """Scene-aware dialogue rewriting with parallel processing."""
+    wps = get_wps(target_lang)
+
     logger.info(f"[WRITER] Rewriting {len(segments)} segments as polished {target_lang} dialogue")
-    logger.info(f"[WRITER] Word rate: {wps}/sec | Voice bible mode ✓")
-    
+    logger.info(f"[WRITER] Word rate: {wps}/sec | Voice bible mode ✓ | Parallel scenes")
+
     # Build voice bible
     vp = voice_plan or [{"voice_id": "NARRATOR", "gender": "male", "age": "adult", "personality": "narrator"}]
     voice_bible = _build_voice_bible(vp, target_lang)
-    
     lang_spec = LANG_SPECIFIC.get(target_lang, LANG_SPECIFIC.get("English", ""))
-    prompt = WRITER_PROMPT.format(
-        target_lang=target_lang, lang_specific=lang_spec, voice_bible=voice_bible
-    )
-    
-    # Group by scene if available
-    groups = []
-    group_labels = []
-    
+
+    # Group by scene
+    scene_groups = []
     if scenes:
-        logger.info(f"[WRITER] Writing by scene ({len(scenes)} scenes)")
+        logger.info(f"[WRITER] Processing by scene ({len(scenes)} scenes)")
         for scene in scenes:
             scene_segs = [s for s in segments if s["id"] in scene.get("segment_ids", [])]
             if scene_segs:
-                # Split large scenes into chunks of 25
-                for i in range(0, len(scene_segs), 25):
-                    chunk = scene_segs[i:i+25]
-                    groups.append(chunk)
-                    group_labels.append(f"Scene {scene['scene_id']+1}")
-    
-    if not groups:
-        groups = [segments[i:i+20] for i in range(0, len(segments), 20)]
-        group_labels = [f"Batch {i+1}" for i in range(len(groups))]
-    
-    # Track character examples for consistency across groups
+                scene_groups.append((scene["scene_id"], f"Scene {scene['scene_id']+1}", scene_segs))
+
+    if not scene_groups:
+        # Split into pseudo-scenes for parallel processing
+        chunk_size = 25
+        for i in range(0, len(segments), chunk_size):
+            chunk = segments[i:i+chunk_size]
+            scene_groups.append((i // chunk_size, f"Batch {i//chunk_size + 1}", chunk))
+
+    # Track character examples across scenes
     char_examples = {}
-    
-    for gi, (group, label) in enumerate(zip(groups, group_labels)):
-        items = [{
-            "id": s["id"],
-            "duration_sec": round(s["end"] - s["start"], 2),
-            "max_words": max(2, int((s["end"] - s["start"]) * wps)),
-            "speaker": s.get("speaker", "NARRATOR"),
-            "mood": s.get("mood", "neutral"),
-            "draft": s.get("dubbed_text", s.get("text", ""))
-        } for s in group]
-        
-        # Character consistency context
-        char_context = ""
-        if char_examples:
-            char_context = "\nCHARACTER VOICE EXAMPLES (maintain same style):\n"
-            for spk, examples in char_examples.items():
-                recent = examples[-2:]
-                for ex in recent:
-                    char_context += f"  {spk} ({ex['mood']}): \"{ex['text'][:50]}\"\n"
-        
-        user_msg = f"""Story: {narrative_summary}
-Mood arc: {mood_arc or 'not specified'}
-{char_context}
-Rewrite these {len(items)} segments ({label}). RESPECT max_words!
-{json.dumps(items, ensure_ascii=False)}"""
-        
-        result, model = _call_llm(prompt, user_msg)
-        
-        if result:
-            seg_map = {s["id"]: s for s in group}
-            for t in result.get("segments", []):
-                if t["id"] in seg_map:
-                    new_text = t.get("dubbed_text", "")
-                    if new_text:
-                        # Enforce word limit
-                        max_w = max(2, int((seg_map[t["id"]]["end"] - seg_map[t["id"]]["start"]) * wps))
-                        words = new_text.split()
-                        if len(words) > max_w + 2:
-                            new_text = " ".join(words[:max_w])
-                        seg_map[t["id"]]["dubbed_text"] = new_text
-                        
-                        # Track for character consistency
-                        speaker = seg_map[t["id"]].get("speaker", "NARRATOR")
-                        mood = seg_map[t["id"]].get("mood", "neutral")
-                        if speaker not in char_examples:
-                            char_examples[speaker] = []
-                        char_examples[speaker].append({"text": new_text, "mood": mood})
-            
-            logger.info(f"[WRITER] {label} ✓ ({model.split('/')[-1]})")
-        else:
-            logger.warning(f"[WRITER] {label} — keeping draft translations")
-    
+
+    try:
+        import nest_asyncio
+        nest_asyncio.apply()
+    except ImportError:
+        pass
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        t0 = time.time()
+
+        # Launch all scene rewrites in parallel
+        tasks = [
+            _rewrite_scene(
+                scene_id, name, segs, target_lang, narrative_summary,
+                mood_arc, voice_bible, lang_spec, wps, char_examples
+            )
+            for scene_id, name, segs in scene_groups
+        ]
+
+        results = asyncio.run(asyncio.gather(*tasks, return_exceptions=True))
+
+        # Update char_examples from results
+        for r in results:
+            if isinstance(r, dict) and r.get("char_examples"):
+                for spk, exs in r["char_examples"].items():
+                    if spk not in char_examples:
+                        char_examples[spk] = []
+                    char_examples[spk].extend(exs[-2:])
+
+        logger.info(f"[WRITER] All scenes complete in {time.time()-t0:.1f}s")
+
+    finally:
+        loop.close()
+
     # Save
     sp = os.path.join(work_dir, "dubbed_script.json")
     with open(sp, "w", encoding="utf-8") as f:
         json.dump({"segments": segments, "target_lang": target_lang}, f, indent=2, ensure_ascii=False)
-    
+
     # Preview
     logger.info(f"[WRITER] {'━' * 55}")
     raw_path = os.path.join(work_dir, "translated_raw.json")
@@ -338,5 +362,5 @@ Rewrite these {len(items)} segments ({label}). RESPECT max_words!
                 logger.info(f"    FINAL: {d[:55]}")
                 shown += 1
     logger.info(f"[WRITER] {'━' * 55}")
-    
+
     return {"script_path": sp}

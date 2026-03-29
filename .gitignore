@@ -1,9 +1,71 @@
-__pycache__/
-*.pyc
+# Environment & Secrets
 .env
-dub_v3_runs/
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Output & Temp Files
 *.mp4
 *.mp3
 *.wav
+*.ogg
+*.flac
 *.srt
+*.vtt
+*.ass
 tts_clips/
+tts_aligned/
+tts_cache/
+dubbed_output/
+output/
+run_*/
+
+# Demucs
+separated/
+mdxnet_cache/
+
+# Logs
+*.log
+logs/
+
+# Google Colab
+/content/
+*.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (rotate these if accidentally committed)
+# GROQ_API_KEY=
+# GROQ_API_KEY_FOR_AUDIO=
