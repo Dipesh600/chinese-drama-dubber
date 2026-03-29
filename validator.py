@@ -3,12 +3,12 @@ QUALITY VALIDATOR — Catches translation/dialogue issues before TTS generation.
 Checks: word count vs timing, Devanagari presence, empty text, hallucination markers.
 """
 import re, logging
+from config import get_wps
 logger = logging.getLogger(__name__)
 
 _DEV_RE = re.compile(r'[\u0900-\u097F]')
-WORDS_PER_SEC = 2.8
 
-def validate(segments, auto_fix=True):
+def validate(segments, target_lang="Hindi", auto_fix=True):
     """
     Validate dubbed segments before TTS. Returns issues dict.
     If auto_fix=True, attempts to fix issues in-place.
@@ -26,7 +26,7 @@ def validate(segments, auto_fix=True):
         text = s.get("dubbed_text", "").strip()
         sid = s.get("id", "?")
         dur = s.get("end", 0) - s.get("start", 0)
-        max_words = max(3, int(dur * WORDS_PER_SEC))
+        max_words = max(3, int(dur * get_wps(target_lang)))
         
         # Check empty
         if not text or len(text) < 2:

@@ -311,8 +311,8 @@ def rewrite(segments, work_dir, target_lang="Hindi", narrative_summary="",
     except ImportError:
         pass
 
+    # Use a fresh event loop — do NOT set it as global default (avoids conflicts)
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         t0 = time.time()

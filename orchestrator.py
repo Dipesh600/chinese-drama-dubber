@@ -14,15 +14,20 @@ ORCHESTRATOR v6.0 — Industry-standard dubbing pipeline:
   12. State persistence for crash recovery
   13. Configuration via config.py (single source of truth)
 """
-import os, sys, json, logging, time, subprocess
+import os, sys, json, logging, time, subprocess, signal
 sys.path.insert(0, os.path.dirname(__file__))
 import director, preprocessor, translator, dialogue_writer, sentence_merger
 import voice_caster, tts_engine, assembler, romanizer, validator
 import audio_separator, timestamp_aligner
 from logging_utils import setup_logging, StageTracker, PipelineContext, generate_correlation_id
+from schemas import validate_director_result, validate_tts_manifest
 
 setup_logging(structured=False, level=logging.INFO)
 log = logging.getLogger(__name__)
+
+
+class CancelledError(Exception):
+    """Raised when pipeline is cancelled via signal."""
 
 
 class DubberV6:
@@ -38,6 +43,17 @@ class DubberV6:
         self.preserve_bg = preserve_bg
         self.use_demucs = use_demucs
         self.correlation_id = generate_correlation_id()
+        self._cancelled = False
+
+        # Register signal handlers for graceful cancellation
+        def _cancel_handler(signum, frame):
+            log.warning(f"[PIPELINE] Received signal {signum} — graceful cancellation requested...")
+            self._cancelled = True
+        try:
+            signal.signal(signal.SIGINT, _cancel_handler)
+            signal.signal(signal.SIGTERM, _cancel_handler)
+        except (ValueError, OSError):
+            pass  # Signal handling not available in this environment (e.g., Windows GUI)
 
         ts = time.strftime("%Y%m%d_%H%M%S")
         self.work_dir = os.path.join(output_dir, f"run_{ts}")
@@ -45,7 +61,12 @@ class DubberV6:
         self.sp = os.path.join(self.work_dir, "state.json")
         self.state = {}
         self.ctx = PipelineContext(url, target_lang, source_lang)
-    
+
+    def _check_cancelled(self):
+        """Raise CancelledError if pipeline was cancelled."""
+        if self._cancelled:
+            raise CancelledError("Pipeline cancelled by user")
+
     def _done(self, k):
         return self.state.get(k, {}).get("done", False)
     
@@ -54,7 +75,15 @@ class DubberV6:
         with open(self.sp, "w") as f:
             json.dump(self.state, f, indent=2)
     
-    def run(self):
+    def run(self, progress_callback=None):
+        """
+        Run the dubbing pipeline.
+
+        Args:
+            progress_callback: Optional callable(stage_info) called after each stage.
+                               stage_info is a dict with keys: stage, done, duration_sec, etc.
+                               Can be used for streaming UI updates.
+        """
         t0 = time.time()
 
         log.info("=" * 70)
@@ -74,6 +103,7 @@ class DubberV6:
             audio_path = os.path.join(self.work_dir, "audio.mp3")
             
             # ━━ STEP 1: DOWNLOAD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             if not self._done("s1"):
                 log.info(f"[1/13] 📥 Downloading: {self.url}")
                 import yt_dlp
@@ -128,8 +158,11 @@ class DubberV6:
                 dur = float(r.stdout.strip())
                 self._save("s1", {"audio_mb": round(audio_mb, 1), "duration": round(dur, 1)})
                 log.info(f"[1/13] ✓ Audio: {audio_mb:.1f}MB | {dur:.0f}s ({dur/60:.1f}min)")
-            
+                if progress_callback:
+                    progress_callback({"stage": "s1", "done": True, "elapsed": time.time() - t0})
+
             # ━━ STEP 1b: AUDIO SEPARATION (Demucs) ━━━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             bg_audio_path = None
             if self.use_demucs and self.preserve_bg:
                 if not self._done("s1b"):
@@ -142,10 +175,13 @@ class DubberV6:
                     except Exception as e:
                         log.warning(f"[1b/13] ⚠ Demucs failed ({e}), using original audio")
                         self._save("s1b", {"success": False, "error": str(e)})
+                    if progress_callback:
+                        progress_callback({"stage": "s1b", "done": True, "elapsed": time.time() - t0})
                 else:
                     bg_audio_path = self.state.get("s1b", {}).get("bg_path")
-            
+
             # ━━ STEP 2: TRANSCRIBE (Whisper) ━━━━━━━━━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             whisper_path = os.path.join(self.work_dir, "whisper.json")
             if not self._done("s2"):
                 log.info(f"[2/13] 🎤 Transcribing (Groq Whisper large-v3)...")
@@ -161,13 +197,16 @@ class DubberV6:
                     json.dump({"segments": segs, "words": words}, f, indent=2, ensure_ascii=False)
                 self._save("s2", {"segments": len(segs), "words": len(words)})
                 log.info(f"[2/13] ✓ {len(segs)} segments, {len(words)} word timestamps")
-            
+                if progress_callback:
+                    progress_callback({"stage": "s2", "done": True, "elapsed": time.time() - t0, "segments": len(segs)})
+
             with open(whisper_path, encoding="utf-8") as f:
                 whisper_data = json.load(f)
             segments = whisper_data["segments"]
             whisper_words = whisper_data.get("words", [])
-            
+
             # ━━ STEP 3: DIRECTOR v4 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             director_path = os.path.join(self.work_dir, "director_plan.json")
             if not self._done("s3"):
                 log.info(f"[3/13] 🎬 DIRECTOR analyzing content...")
@@ -182,11 +221,23 @@ class DubberV6:
                     whisper_words=whisper_words,
                     audio_path=audio_path
                 )
+                # Validate director output before entering translation pipeline
+                try:
+                    validate_director_result(dir_result)
+                    log.debug(f"[3/13] ✓ Director output validated")
+                except Exception as e:
+                    log.warning(f"[3/13] ⚠ Director output validation issue: {e}")
                 self._save("s3", {
                     "content_type": dir_result["content_type"],
                     "speakers": dir_result["real_speaker_count"],
                     "scenes": len(dir_result.get("scenes", []))
                 })
+                if progress_callback:
+                    progress_callback({
+                        "stage": "s3", "done": True, "elapsed": time.time() - t0,
+                        "content_type": dir_result["content_type"],
+                        "speakers": dir_result["real_speaker_count"], "scenes": n_scenes
+                    })
             
             with open(director_path, encoding="utf-8") as f:
                 dir_result = json.load(f)
@@ -212,6 +263,7 @@ class DubberV6:
             dir_result["segments"] = merged
             
             # ━━ STEP 5: TRANSLATE (Two-Pass) ━━━━━━━━━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             raw_path = os.path.join(self.work_dir, "translated_raw.json")
             if not self._done("s5"):
                 log.info(f"[5/13] 🌐 Translating → {self.target_lang} (two-pass)...")
@@ -219,6 +271,8 @@ class DubberV6:
                 log.info(f"[5/13]    Pass 2: Scene-aware polish for coherence")
                 translator.translate(dir_result, self.work_dir, self.target_lang)
                 self._save("s5", {"raw_path": raw_path})
+                if progress_callback:
+                    progress_callback({"stage": "s5", "done": True, "elapsed": time.time() - t0})
             with open(raw_path, encoding="utf-8") as f:
                 raw_script = json.load(f)
             
@@ -227,6 +281,7 @@ class DubberV6:
             romanizer.romanize_segments(raw_script["segments"])
             
             # ━━ STEP 6: DIALOGUE WRITER v4 ━━━━━━━━━━━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             dubbed_path = os.path.join(self.work_dir, "dubbed_script.json")
             if not self._done("s6"):
                 log.info(f"[6/13] ✍️ DIALOGUE WRITER (voice bible + scene-grouped)...")
@@ -238,6 +293,8 @@ class DubberV6:
                     scenes=dir_result.get("scenes"),
                 )
                 self._save("s6", {"dubbed_path": dubbed_path})
+                if progress_callback:
+                    progress_callback({"stage": "s6", "done": True, "elapsed": time.time() - t0})
             with open(dubbed_path, encoding="utf-8") as f:
                 dubbed_script = json.load(f)
             
@@ -252,7 +309,7 @@ class DubberV6:
             
             # ━━ STEP 6c: VALIDATE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             log.info(f"[6c/13] ✅ Validating script quality...")
-            validator.validate(expanded, auto_fix=True)
+            validator.validate(expanded, target_lang=self.target_lang, auto_fix=True)
             
             # ━━ STEP 7: SENTENCE MERGE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             log.info(f"[7/13] 📝 Merging into sentence-level TTS units...")
@@ -264,13 +321,21 @@ class DubberV6:
             log.info(f"[8/13] ✓ {len(cast_map)} voice profiles locked")
             
             # ━━ STEP 9: TTS GENERATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             tts_manifest_path = os.path.join(self.work_dir, "tts_manifest.json")
             if not self._done("s9"):
                 log.info(f"[9/13] 🔊 Generating TTS ({len(tts_segments)} units)...")
+                # Validate TTS segments before generation
+                for i, seg in enumerate(tts_segments):
+                    if not seg.get("tts_text", "").strip():
+                        log.warning(f"[9/13] ⚠ Segment {i} has empty tts_text, will use dubbed_text")
+                        seg["tts_text"] = seg.get("dubbed_text", "")
                 tts_manifest = tts_engine.generate(
                     tts_segments, self.work_dir, cast_map, self.target_lang
                 )
                 self._save("s9", {"clips": len(tts_manifest)})
+                if progress_callback:
+                    progress_callback({"stage": "s9", "done": True, "elapsed": time.time() - t0, "clips": len(tts_manifest)})
             with open(tts_manifest_path) as f:
                 tts_manifest = json.load(f)
             log.info(f"[9/13] ✓ {len(tts_manifest)} clips generated")
@@ -280,6 +345,7 @@ class DubberV6:
             tts_manifest = timestamp_aligner.align(tts_manifest, self.work_dir)
             
             # ━━ STEP 11: ASSEMBLE (Professional Mix) ━━━━━━━━━━━━━━━━
+            self._check_cancelled()
             if not self._done("s11"):
                 log.info(f"[11/13] 🎵 Assembling (professional mix)...")
                 
@@ -301,7 +367,9 @@ class DubberV6:
                     bg_audio_path=bg_audio_path
                 )
                 self._save("s11", asm_r)
-            
+                if progress_callback:
+                    progress_callback({"stage": "s11", "done": True, "elapsed": time.time() - t0})
+
             with open(self.sp) as f:
                 final = json.load(f)
             asm_r = {k: v for k, v in final.get("s11", {}).items() if k != "done"}
@@ -332,7 +400,17 @@ class DubberV6:
                 "work_dir": self.work_dir,
                 "scenes": n_scenes,
             }
-            
+
+        except CancelledError as e:
+            log.warning(f"[PIPELINE] ⚠️ Cancelled at stage {self._get_current_stage()}")
+            return {
+                "success": False,
+                "cancelled": True,
+                "error": str(e),
+                "work_dir": self.work_dir,
+                "stage": self._get_current_stage(),
+            }
+
         except Exception as e:
             import traceback
             log.error(f"❌ Pipeline error: {e}")
@@ -354,10 +432,10 @@ class DubberV6:
 
 def run_agent(url, target_lang="Hindi", source_lang="zh",
               user_description="", output_dir="/content/drive/MyDrive/DubbedVideos",
-              preserve_bg=True, use_demucs=True):
+              preserve_bg=True, use_demucs=True, progress_callback=None):
     """
     Run the industry-standard dubbing pipeline.
-    
+
     Args:
         url: YouTube video URL
         target_lang: Target language (Hindi, Tamil, Telugu, Bengali, Nepali, English, etc.)
@@ -366,7 +444,9 @@ def run_agent(url, target_lang="Hindi", source_lang="zh",
         output_dir: Base directory for output files
         preserve_bg: Keep background music/ambient audio
         use_demucs: Use Demucs to separate vocals from background
-    
+        progress_callback: Optional callable(stage_info) — called after each stage
+                         with a dict containing stage, done, elapsed, etc.
+
     Returns:
         dict with success status, paths, and metadata
     """
@@ -375,4 +455,4 @@ def run_agent(url, target_lang="Hindi", source_lang="zh",
         user_description=user_description, output_dir=output_dir,
         preserve_bg=preserve_bg, use_demucs=use_demucs
     )
-    return d.run()
+    return d.run(progress_callback=progress_callback)

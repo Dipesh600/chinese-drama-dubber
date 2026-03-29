@@ -10,6 +10,7 @@ Architecture:
 4. Edge TTS fallback if Fish Speech not available
 """
 import os, json, logging
+from config import ROLE_GENDER
 logger = logging.getLogger(__name__)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -199,15 +200,6 @@ VOICE_CATALOG = {
         "fish_audio_refs": {},
         "edge_fallback": {"male": "hi-IN-MadhurNeural", "female": "hi-IN-SwaraNeural"}  # Hindi fallback
     },
-}
-
-# Default role → gender mapping
-ROLE_GENDER = {
-    "NARRATOR": "male", "FATHER": "male", "MOTHER": "female", "SON": "male",
-    "DAUGHTER": "female", "OLD_MAN": "male", "OLD_WOMAN": "female",
-    "YOUNG_MAN": "male", "YOUNG_WOMAN": "female", "GIRL": "female", "BOY": "male",
-    "VILLAIN": "male", "HERO": "male", "HEROINE": "female",
-    "CHAR_A": "male", "CHAR_B": "female", "CHAR_C": "male", "CHAR_D": "female",
 }
 
 

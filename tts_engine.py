@@ -30,6 +30,13 @@ except ImportError:
     HAS_HTTPX = False
     logger.warning("[TTS] httpx not installed — Fish Speech unavailable")
 
+try:
+    from voice_catalog import get_fish_ref, VOICE_CATALOG
+    HAS_VOICE_CATALOG = True
+except ImportError:
+    HAS_VOICE_CATALOG = False
+    logger.warning("[TTS] voice_catalog not available — using speaker names for Fish Speech")
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIGURATION
@@ -127,7 +134,7 @@ def _fish_available():
         return False
 
 
-def _fish_generate(text, output_path, voice_id=None, speaker=None):
+def _fish_generate(text, output_path, speaker=None, target_lang="Hindi"):
     """Generate TTS using local Fish Speech server."""
     if not HAS_HTTPX:
         raise RuntimeError("httpx not installed")
@@ -136,12 +143,24 @@ def _fish_generate(text, output_path, voice_id=None, speaker=None):
         payload = {
             "text": text,
             "format": "wav",
-            "model": "fish-speech-1.4"
+            "model": "fish-speech-1.5"
         }
-        # Fish Speech voice reference or speaker
-        if voice_id:
-            payload["voice"] = voice_id
+
+        # Try to get Fish Audio reference ID from voice_catalog
+        fish_ref = None
+        if HAS_VOICE_CATALOG and speaker:
+            # Get the voice entry from catalog for this speaker
+            lang_data = VOICE_CATALOG.get(target_lang, VOICE_CATALOG.get("Hindi", {}))
+            voices = lang_data.get("voices", [])
+            for v in voices:
+                if speaker in v.get("best_for", []) and v.get("fish_audio_refs", {}).get(v["id"]):
+                    fish_ref = v["fish_audio_refs"][v["id"]]
+                    break
+
+        if fish_ref:
+            payload["reference_id"] = fish_ref
         elif speaker:
+            # Fallback: use speaker name as reference hint
             payload["reference_id"] = speaker.lower()
 
         r = httpx.post(
@@ -211,7 +230,7 @@ def _edge_tts_generate(text, output_path, voice, rate="+0%", pitch="+0Hz", volum
 # TTS GENERATION WORKER (for parallel execution)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _generate_clip(seg, cast_map, clips_dir, fish_available):
+def _generate_clip(seg, cast_map, clips_dir, fish_available, target_lang="Hindi"):
     """
     Generate a single TTS clip with Fish Speech PRIMARY, Edge TTS FALLBACK.
     Returns (success, clip_info_dict) tuple.
@@ -259,7 +278,7 @@ def _generate_clip(seg, cast_map, clips_dir, fish_available):
         # Try Fish Speech FIRST (primary)
         if fish_available:
             try:
-                _fish_generate(attempt_text, clip_path, voice_id=speaker.lower(), speaker=speaker)
+                _fish_generate(attempt_text, clip_path, speaker=speaker, target_lang=target_lang)
                 generated = True
                 engine_used = "fish"
                 break
@@ -378,7 +397,7 @@ def generate(segments, work_dir, cast_map, target_lang="Hindi"):
     # ── Parallel Generation ─────────────────────────────────────────
     with ThreadPoolExecutor(max_workers=TTS_WORKERS) as executor:
         futures = {
-            executor.submit(_generate_clip, seg, cast_map, clips_dir, fish_available): seg
+            executor.submit(_generate_clip, seg, cast_map, clips_dir, fish_available, target_lang): seg
             for seg in segments
         }
 

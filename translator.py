@@ -361,8 +361,8 @@ def translate(dir_result, work_dir, target_lang="Hindi"):
     except ImportError:
         pass
 
+    # Use a fresh event loop — do NOT set it as global default (avoids conflicts)
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         # Pass 1: Parallel draft translation
