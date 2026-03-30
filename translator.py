@@ -169,7 +169,7 @@ async def _translate_pass1_parallel(
     """Pass 1: Parallel translation by scene."""
     lang_inst = get_lang_instruction(target_lang)
     name_gloss = _build_name_glossary(character_names)
-    prompt = DRAFT_PROMPT.format(lang_instruction=lang_inst, name_glossary=name_gloss)
+    prompt = DRAFT_PROMPT.format(lang_instruction=lang_inst, name_glossary=name_gloss, target_lang=target_lang)
 
     # Group segments by scene
     scene_groups = []
