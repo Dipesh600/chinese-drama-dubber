@@ -271,10 +271,12 @@ def assemble(manifest, work_dir, video_path, total_dur,
             bg_source = bg_audio_path
             logger.info("[ASSEMBLE] Step 2/5: Using Demucs-separated clean background ✓")
         else:
-            alt = os.path.join(work_dir, "audio.mp3")
-            if os.path.exists(alt):
-                bg_source = alt
-                logger.info("[ASSEMBLE] Step 2/5: Using original audio as background")
+            # Demucs failed — do NOT fall back to original audio (has vocals that would bleed through).
+            # Instead, create silence track so dubbed audio is clean.
+            logger.warning("[ASSEMBLE] ⚠ Demucs unavailable — using silent background (no vocal bleed)")
+            silent_bg = os.path.join(work_dir, "_silent_bg.wav")
+            _create_silence(silent_bg, total_dur)
+            bg_source = silent_bg
 
     # ── Step 3: Mix voiced + background ────────────────────────
     logger.info("[ASSEMBLE] Step 3/5: Mixing voice + background...")

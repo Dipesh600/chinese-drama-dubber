@@ -168,13 +168,16 @@ class DubberV6:
                 if not self._done("s1b"):
                     try:
                         log.info(f"[1b/13] 🎵 Separating audio (Demucs)...")
-                        stems = audio_separator.separate(audio_path, self.work_dir)
+                        stems = audio_separator.separate(
+                            audio_path, self.work_dir,
+                            preserve_bg=self.preserve_bg
+                        )
                         bg_audio_path = stems.get("bg_path")
                         self._save("s1b", {"bg_path": bg_audio_path or "", "success": True})
                         log.info(f"[1b/13] ✓ Clean background extracted!")
                     except Exception as e:
-                        log.warning(f"[1b/13] ⚠ Demucs failed ({e}), using original audio")
-                        self._save("s1b", {"success": False, "error": str(e)})
+                        log.warning(f"[1b/13] ⚠ Demucs failed ({e}), background will be silent")
+                        self._save("s1b", {"bg_path": "", "success": False, "error": str(e)})
                     if progress_callback:
                         progress_callback({"stage": "s1b", "done": True, "elapsed": time.time() - t0})
                 else:

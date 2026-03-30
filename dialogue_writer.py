@@ -122,11 +122,12 @@ You receive draft translations and REWRITE them as polished, natural SPOKEN dial
 
 YOUR JOB IS TO MAKE IT SOUND REAL — like actual people talking, not a textbook.
 
-⚠️ WORD COUNT RULES (STRICT — violations = rejection):
-- Each segment has "max_words" = MAXIMUM words allowed
-- Your dubbed_text MUST have ≤ max_words words
-- If draft is too long → COMPRESS meaning, cut filler
-- SHORT IS ALWAYS BETTER than too long (too-long = robotic TTS)
+⚠️ WORD COUNT RULES:
+- Each segment has "max_words" = SOFT maximum words allowed
+- If draft is within max_words+3 → keep it as-is (don't chop!)
+- Only compress if significantly over budget; cut filler NOT meaning
+- PRESERVE ALL KEY NOUNS and VERBS — meaning loss = rejection
+- SHORT IS ONLY BETTER if the original is wordy/rambling
 
 🎭 EMOTION DELIVERY (match the mood field):
 - neutral → calm, steady, clear
@@ -158,20 +159,21 @@ Return JSON: {{"segments": [{{"id": X, "dubbed_text": "rewritten dialogue"}}]}}"
 
 LANG_SPECIFIC = {
     "Hindi": """HINDI DIALOGUE:
-- Natural Hinglish as Indians actually speak
-- Keep English words: okay, sorry, please, time, phone, market, school
-- Narrator: NO slang (no "yaar", "arey", "na")
-- Characters CAN use light slang: "Arey bhai!", "Haan yaar"
-- Elderly: Use more formal Hindi: "Aap", "Ji"
-- Young: Casual: "Tu", "Tum", English mix""",
+- Write COMPLETE sentences in Hindi using Roman script
+- DO NOT mix English and Hindi (e.g., "Razor, ek shell" is WRONG → write "Razor ek shell tha")
+- Only keep English words that Indians naturally use: okay, sorry, please, phone, school, time, office, TV
+- For names/events: use phonetic Hindi ("Seizar" not "Caesar", "Reyzor" not "Razor")
+- Narrator: formal Hindi, no slang
+- Characters: natural spoken Hindi, light Hinglish OK
+- Preserve FULL meaning — never drop nouns or verbs""",
     "Nepali": """NEPALI DIALOGUE:
 - Natural spoken Nepali with English mix
 - "Hajur" for respectful address
 - Keep English words Nepalis use: office, school, phone, okay
 - Roman script only""",
-    "Tamil": "Natural spoken Tamil with Tanglish. Roman script only.",
-    "Telugu": "Natural spoken Telugu. Roman script only.",
-    "Bengali": "Natural spoken Bengali. Roman script only.",
+    "Tamil": "Natural spoken Tamil with Tanglish. Roman script only. Write full Tamil sentences, not English fragments.",
+    "Telugu": "Natural spoken Telugu. Roman script only. Write full Telugu sentences.",
+    "Bengali": "Natural spoken Bengali. Roman script only. Write full Bengali sentences.",
     "English": "Natural engaging English. Conversational, expressive.",
 }
 
@@ -249,9 +251,12 @@ Rewrite these {len(items)} segments ({scene_name}). RESPECT max_words!
             if t["id"] in seg_map:
                 new_text = t.get("dubbed_text", "")
                 if new_text:
+                    # Allow up to max_words + 5 buffer before truncating
+                    # Don't truncate if already within budget (avoids destroying meaning)
                     max_w = max(2, int((seg_map[t["id"]]["end"] - seg_map[t["id"]]["start"]) * wps))
                     words = new_text.split()
-                    if len(words) > max_w + 2:
+                    if len(words) > max_w + 5:
+                        # Gentle truncation: keep meaning, cut trailing filler
                         new_text = " ".join(words[:max_w])
                     seg_map[t["id"]]["dubbed_text"] = new_text
 

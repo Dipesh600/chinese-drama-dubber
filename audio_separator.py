@@ -149,14 +149,12 @@ def _needs_demucs(audio_path):
         return True
 
 
-def separate(audio_path, work_dir, device="auto", force_separate=False):
+def separate(audio_path, work_dir, device="auto", force_separate=False, preserve_bg=True):
     """
-    Separate audio into stems using Demucs (if needed).
+    Separate audio into stems using Demucs.
 
-    Smart Detection:
-    - First analyzes audio for vocal bleed
-    - Skips Demucs if background is already clean (saves 5-10 minutes)
-    - Only runs full separation when vocal bleed is significant
+    For dubbing (preserve_bg=True): Demucs ALWAYS runs to remove original vocals.
+    Smart skip is disabled for dubbing — original vocals must be removed.
 
     Returns:
         dict with paths to separated stems
@@ -176,9 +174,11 @@ def separate(audio_path, work_dir, device="auto", force_separate=False):
             "vocals_path": os.path.join(output_dir, "vocals.wav"),
         }
 
-    # Smart detection: decide if Demucs is actually needed
-    if not force_separate and not _needs_demucs(audio_path):
-        # Background is clean enough, use original audio
+    # FOR DUBBING: Always run Demucs to remove original vocals.
+    # Smart skip is only valid for music remix workflows where vocals are wanted.
+    # When preserve_bg=True, we need clean background (no original vocals).
+    if not force_separate and not preserve_bg and not _needs_demucs(audio_path):
+        # Smart skip only applies when NOT preserving background
         try:
             cmd = [
                 "ffmpeg", "-y", "-i", audio_path,
@@ -187,7 +187,7 @@ def separate(audio_path, work_dir, device="auto", force_separate=False):
             ]
             subprocess.run(cmd, capture_output=True, timeout=60)
             bg_size = os.path.getsize(bg_path) / 1024 / 1024
-            logger.info(f"[SEPARATOR] ✓ Using original audio as background: {bg_size:.1f}MB")
+            logger.info(f"[SEPARATOR] ✓ No background preserve requested, using original: {bg_size:.1f}MB")
             return {
                 "bg_path": bg_path,
                 "music_path": "",
@@ -196,7 +196,7 @@ def separate(audio_path, work_dir, device="auto", force_separate=False):
                 "skipped_demucs": True,
             }
         except Exception as e:
-            logger.warning(f"[SEPARATOR] Failed to use original audio: {e}, running Demucs")
+            logger.warning(f"[SEPARATOR] Failed: {e}, running Demucs")
 
     # ── Run Demucs ──────────────────────────────────────────────────
     logger.info(f"[SEPARATOR] Separating audio with {DEMUCS_MODEL}...")
