@@ -69,7 +69,7 @@ def cast(dir_result, target_lang="Hindi"):
             f"rate={profile['rate']} pitch={profile['pitch']} vol={profile.get('volume','+0%')}"
         )
 
-    # Ensure NARRATOR exists
+    # Ensure NARRATOR exists (neutral profile)
     if not cast_map:
         default_profile = VOICE_PROFILES["NARRATOR"]
         cast_map["NARRATOR"] = {
@@ -79,6 +79,10 @@ def cast(dir_result, target_lang="Hindi"):
             "volume": default_profile.get("volume", "+0%"),
             "gender": "male",
         }
+
+    # Log pitch consistency stats
+    pitches = [v["pitch"] for v in cast_map.values()]
+    logger.info(f"[CAST] ✓ Cast complete — {len(cast_map)} voices | pitches: {pitches}")
 
     return cast_map
 

@@ -126,24 +126,28 @@ COOKIE_FILE = os.environ.get("COOKIE_FILE", "")
 # ═══════════════════════════════════════════════════════════════════════════════
 
 VOICE_PROFILES = {
+    # All profiles use neutral pitch (±10Hz max) — per-clip LUFS normalization in
+    # timestamp_aligner already handles volume consistency. Pitch variation is now
+    # minimal to avoid "sometimes low, sometimes high" perception.
+    # Character differentiation comes primarily from SPEECH RATE.
     "NARRATOR":    {"gender": "male",   "rate": "+3%",   "pitch": "+0Hz",   "volume": "+0%"},
-    "FATHER":      {"gender": "male",   "rate": "-10%",  "pitch": "-15Hz",  "volume": "+5%"},
-    "OLD_MAN":     {"gender": "male",   "rate": "-18%",  "pitch": "-25Hz",  "volume": "-5%"},
-    "HERO":        {"gender": "male",   "rate": "+5%",   "pitch": "+5Hz",   "volume": "+5%"},
-    "VILLAIN":     {"gender": "male",   "rate": "-8%",   "pitch": "-20Hz",  "volume": "+10%"},
-    "YOUNG_MAN":   {"gender": "male",   "rate": "+12%",  "pitch": "+8Hz",   "volume": "+0%"},
-    "CHAR_A":      {"gender": "male",   "rate": "+0%",   "pitch": "-5Hz",   "volume": "+0%"},
-    "CHAR_C":      {"gender": "male",   "rate": "-5%",   "pitch": "-10Hz",  "volume": "+0%"},
-    "MOTHER":      {"gender": "female", "rate": "-3%",   "pitch": "+0Hz",   "volume": "+0%"},
-    "OLD_WOMAN":   {"gender": "female", "rate": "-12%",  "pitch": "-10Hz",  "volume": "-5%"},
-    "HEROINE":     {"gender": "female", "rate": "+5%",   "pitch": "+8Hz",   "volume": "+5%"},
-    "YOUNG_WOMAN": {"gender": "female", "rate": "+8%",   "pitch": "+10Hz",  "volume": "+0%"},
-    "DAUGHTER":    {"gender": "female", "rate": "+5%",   "pitch": "+5Hz",   "volume": "+0%"},
-    "GIRL":        {"gender": "female", "rate": "+15%",  "pitch": "+18Hz",  "volume": "+5%"},
-    "CHAR_B":      {"gender": "female", "rate": "+0%",   "pitch": "+3Hz",   "volume": "+0%"},
-    "CHAR_D":      {"gender": "female", "rate": "+8%",   "pitch": "+12Hz",  "volume": "+0%"},
-    "BOY":         {"gender": "female", "rate": "+15%",  "pitch": "+25Hz",  "volume": "+5%"},
-    "SON":         {"gender": "female", "rate": "+10%",  "pitch": "+18Hz",  "volume": "+0%"},
+    "FATHER":      {"gender": "male",   "rate": "-12%",  "pitch": "-5Hz",  "volume": "+0%"},
+    "OLD_MAN":     {"gender": "male",   "rate": "-18%",  "pitch": "-8Hz",  "volume": "+0%"},
+    "HERO":        {"gender": "male",   "rate": "+6%",   "pitch": "+3Hz",   "volume": "+0%"},
+    "VILLAIN":     {"gender": "male",   "rate": "-10%",  "pitch": "-10Hz", "volume": "+0%"},
+    "YOUNG_MAN":   {"gender": "male",   "rate": "+12%",  "pitch": "+5Hz",  "volume": "+0%"},
+    "CHAR_A":      {"gender": "male",   "rate": "+0%",   "pitch": "-3Hz",  "volume": "+0%"},
+    "CHAR_C":      {"gender": "male",   "rate": "-5%",   "pitch": "-5Hz",  "volume": "+0%"},
+    "MOTHER":      {"gender": "female", "rate": "-5%",   "pitch": "+3Hz",  "volume": "+0%"},
+    "OLD_WOMAN":   {"gender": "female", "rate": "-12%",  "pitch": "-5Hz", "volume": "+0%"},
+    "HEROINE":     {"gender": "female", "rate": "+6%",   "pitch": "+8Hz",  "volume": "+0%"},
+    "YOUNG_WOMAN": {"gender": "female", "rate": "+10%",  "pitch": "+6Hz", "volume": "+0%"},
+    "DAUGHTER":    {"gender": "female", "rate": "+8%",   "pitch": "+5Hz",  "volume": "+0%"},
+    "GIRL":        {"gender": "female", "rate": "+15%",  "pitch": "+8Hz",  "volume": "+0%"},
+    "CHAR_B":      {"gender": "female", "rate": "+0%",   "pitch": "+3Hz",  "volume": "+0%"},
+    "CHAR_D":      {"gender": "female", "rate": "+8%",   "pitch": "+6Hz",  "volume": "+0%"},
+    "BOY":         {"gender": "female", "rate": "+15%",  "pitch": "+8Hz", "volume": "+0%"},
+    "SON":         {"gender": "female", "rate": "+10%",  "pitch": "+6Hz", "volume": "+0%"},
 }
 
 ROLE_GENDER = {

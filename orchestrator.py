@@ -18,7 +18,7 @@ import os, sys, json, logging, time, subprocess, signal
 sys.path.insert(0, os.path.dirname(__file__))
 import director, preprocessor, translator, dialogue_writer, sentence_merger
 import voice_caster, tts_engine, assembler, romanizer, validator
-import audio_separator, timestamp_aligner
+import audio_separator, timestamp_aligner, transcriber
 from logging_utils import setup_logging, StageTracker, PipelineContext, generate_correlation_id
 from schemas import validate_director_result, validate_tts_manifest
 
@@ -183,14 +183,25 @@ class DubberV6:
                 else:
                     bg_audio_path = self.state.get("s1b", {}).get("bg_path")
 
-            # ━━ STEP 2: TRANSCRIBE (Whisper) ━━━━━━━━━━━━━━━━━━━━━━━━
+            # ━━ STEP 2: TRANSCRIBE (faster-whisper GPU) ━━━━━━━━━━━━━━━
             self._check_cancelled()
             whisper_path = os.path.join(self.work_dir, "whisper.json")
             if not self._done("s2"):
-                log.info(f"[2/13] 🎤 Transcribing (Groq Whisper large-v3)...")
-                from llm_provider import get_llm
-                llm = get_llm()
-                result = llm.transcribe(audio_path, language=self.source_lang)
+                log.info(f"[2/13] 🎤 Transcribing (faster-whisper GPU / distil-large-v3)...")
+                try:
+                    result = transcriber.transcribe(
+                        audio_path,
+                        language=self.source_lang,
+                        use_faster=True,
+                        enable_diarization=False,  # Enable for speaker detection
+                    )
+                except Exception as e:
+                    log.warning(f"[2/13] faster-whisper failed ({e}), falling back to Groq Whisper...")
+                    result = transcriber.transcribe(
+                        audio_path,
+                        language=self.source_lang,
+                        use_faster=False,  # Force Groq
+                    )
                 if result:
                     segs = result["segments"]
                     words = result.get("words", [])
