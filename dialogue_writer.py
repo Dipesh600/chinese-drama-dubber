@@ -117,17 +117,19 @@ def _build_voice_bible(voice_plan, target_lang):
 # WRITER PROMPT
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-WRITER_PROMPT = """You are an expert DIALOGUE WRITER for dubbed video content in {target_lang}.
-You receive draft translations and REWRITE them as polished, natural SPOKEN dialogue.
+WRITER_PROMPT = """You are an expert DIALOGUE WRITER for {target_lang} dubbed video content.
+You receive draft translations and REWRITE them as natural, conversational {target_lang} speech.
 
-YOUR JOB IS TO MAKE IT SOUND REAL — like actual people talking, not a textbook.
+YOUR JOB: Make it SOUND like real {target_lang} people TALKING — not a written text, not a translation, but actual spoken dialogue.
 
-⚠️ WORD COUNT RULES:
-- Each segment has "max_words" = SOFT maximum words allowed
-- If draft is within max_words+3 → keep it as-is (don't chop!)
-- Only compress if significantly over budget; cut filler NOT meaning
-- PRESERVE ALL KEY NOUNS and VERBS — meaning loss = rejection
-- SHORT IS ONLY BETTER if the original is wordy/rambling
+DIALOGUE WRITING RULES:
+1. {lang_specific}
+2. max_words is a SOFT guide only — prioritize complete sentences over word count
+3. PRESERVE ALL meaning — don't drop names, numbers, events, or key information
+4. Natural sentence structure for {target_lang} — not English word order
+5. Match the EMOTION/MOOD: angry→sharp/punchy, sad→softer/slower, happy→energetic, dramatic→bold
+6. Each segment is a complete spoken sentence — never leave a thought unfinished
+7. Write in ROMAN script only (English letters)
 
 🎭 EMOTION DELIVERY (match the mood field):
 - neutral → calm, steady, clear
@@ -185,7 +187,7 @@ LANG_SPECIFIC = {
 def _call_llm_sync(prompt: str, message: str) -> Optional[Dict]:
     """Synchronous wrapper for LLM call."""
     llm = get_llm()
-    return llm.chat(prompt, message, temperature=0.3, max_tokens=4000, json_response=True)
+    return llm.chat(prompt, message, temperature=0.3, max_tokens=8000, json_response=True)
 
 
 async def _call_llm_async(prompt: str, message: str) -> Optional[Dict]:
@@ -251,13 +253,11 @@ Rewrite these {len(items)} segments ({scene_name}). RESPECT max_words!
             if t["id"] in seg_map:
                 new_text = t.get("dubbed_text", "")
                 if new_text:
-                    # Allow up to max_words + 5 buffer before truncating
-                    # Don't truncate if already within budget (avoids destroying meaning)
-                    max_w = max(2, int((seg_map[t["id"]]["end"] - seg_map[t["id"]]["start"]) * wps))
+                    # Only truncate at 2x budget — preserve meaning and natural sentence structure
+                    max_w = max(3, int((seg_map[t["id"]]["end"] - seg_map[t["id"]]["start"]) * wps))
                     words = new_text.split()
-                    if len(words) > max_w + 5:
-                        # Gentle truncation: keep meaning, cut trailing filler
-                        new_text = " ".join(words[:max_w])
+                    if len(words) > max_w * 2:
+                        new_text = " ".join(words[:int(max_w * 1.5)])
                     seg_map[t["id"]]["dubbed_text"] = new_text
 
                     # Track for character consistency

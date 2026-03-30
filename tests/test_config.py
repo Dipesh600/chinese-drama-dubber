@@ -13,9 +13,9 @@ from config import (
 
 def test_words_per_sec_defaults():
     """Test that WORDS_PER_SEC has sensible defaults."""
-    assert WORDS_PER_SEC["Hindi"] == 2.5
-    assert WORDS_PER_SEC["English"] == 3.0
-    assert WORDS_PER_SEC["Tamil"] == 2.0
+    assert WORDS_PER_SEC["Hindi"] == 3.5
+    assert WORDS_PER_SEC["English"] == 3.5
+    assert WORDS_PER_SEC["Tamil"] == 3.0
     # Unknown language should fallback to 2.5
     assert get_wps("UnknownLang") == 2.5
 
@@ -23,7 +23,7 @@ def test_words_per_sec_defaults():
 def test_get_wps_returns_float():
     """Test get_wps returns correct value."""
     assert isinstance(get_wps("Hindi"), float)
-    assert get_wps("Hindi") == 2.5
+    assert get_wps("Hindi") == 3.5
 
 
 def test_lang_instructions_exist():

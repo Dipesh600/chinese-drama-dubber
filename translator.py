@@ -25,37 +25,33 @@ logger = logging.getLogger(__name__)
 # PROMPTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-DRAFT_PROMPT = """You are a professional video dubbing translator. Translate for lip-sync dubbing.
+DRAFT_PROMPT = """You are a professional video dubbing translator for {target_lang} dubbing.
 
-ABSOLUTE RULES:
-1. Translate ONLY what is in "original" — NEVER add, invent, or hallucinate content
-2. {lang_instruction}
-3. TIMING IS KING: Each segment has "duration_sec" and "max_words". Your translation MUST:
-   - Have ≤ max_words words
-   - Be speakable within the given duration at normal pace
-   - A 1.5s segment needs ~4 Hindi words, NOT a full sentence
-4. Short original = short translation. "好" (1 word) → "Accha" (1 word), NOT "Yeh bahut accha hai"
-5. PRESERVE character names exactly (proper nouns stay unchanged)
-6. Match the MOOD: angry→sharp words, sad→softer words, happy→energetic words
-7. Each segment is INDEPENDENT — translate it as the CHARACTER would say it, not as narration about it
+TRANSLATION RULES:
+1. {lang_instruction}
+2. Preserve ALL key information — never drop names, numbers, events, or meaning
+3. Write in ROMAN script (English letters, no native scripts)
+4. PRESERVE character names exactly (proper nouns stay unchanged)
+5. Match the MOOD: angry→sharp words, sad→softer words, happy→energetic words
+6. Natural word order for {target_lang} — translate meaning, not word order
+7. max_words is a SOFT guide only — prioritize complete, meaningful sentences over the word limit
 
 {name_glossary}
 
 Return JSON: {{"segments": [{{"id": X, "dubbed_text": "..."}}]}}"""
 
-POLISH_PROMPT = """You are a senior dubbing script editor reviewing draft translations for {target_lang} dubbing.
+POLISH_PROMPT = """You are a senior {target_lang} dubbing script editor.
 
-Your job is to POLISH the draft translations for naturalness and coherence. The translations are already roughly correct — you are refining, not re-translating.
+Your job is to POLISH draft translations into natural, conversational {target_lang} speech. The drafts have the right meaning — your job is to make them SOUND REAL.
 
 CHECK AND FIX:
-1. COHERENCE: Do consecutive lines flow naturally? Fix awkward transitions.
-2. CHARACTER VOICE: Does each character speak consistently? Father=authoritative, Child=simple vocabulary.
-3. NATURALNESS: Does it sound like natural {target_lang}? Remove stiff/bookish phrasing.
-4. REPEATED LINES: If two segments have identical translation, vary the wording.
-5. SENTENCE FRAGMENTS: If a sentence is split across segments, ensure each part is complete.
-6. WORD COUNT: STILL respect max_words. If polishing makes it longer, CUT words.
-7. EMOTION MATCH: Angry lines should be punchy. Sad lines softer. Don't use neutral phrasing for emotional moments.
-8. Write in ROMAN script only (no Devanagari/native scripts).
+1. NATURALNESS: Does it sound like natural {target_lang} people actually speak? Remove stiff/bookish phrasing. Use contractions/natural forms.
+2. COMPLETE SENTENCES: Ensure each line is a complete, meaningful sentence — not a fragment
+3. CHARACTER VOICE: Does each character speak consistently? Adjust vocabulary to match
+4. EMOTION MATCH: Angry lines should be punchy. Sad lines softer. Don't use neutral phrasing for emotional moments
+5. NO WORD COUNT LIMITS: If polishing makes it slightly longer and it sounds more natural — keep it
+6. IF A SEGMENT IS TOO SHORT to convey meaning naturally, you MAY expand slightly using context
+7. Write in ROMAN script only
 
 Return JSON: {{"segments": [{{"id": X, "dubbed_text": "polished text"}}]}}"""
 
@@ -67,7 +63,7 @@ Return JSON: {{"segments": [{{"id": X, "dubbed_text": "polished text"}}]}}"""
 def _call_llm_sync(prompt: str, message: str, model: str = None) -> Optional[Dict]:
     """Synchronous wrapper for LLM call (runs in thread pool)."""
     llm = get_llm()
-    return llm.chat(prompt, message, model=model, json_response=True)
+    return llm.chat(prompt, message, model=model, json_response=True, max_tokens=8000)
 
 
 async def _call_llm_async(prompt: str, message: str, model: str = None) -> Optional[Dict]:
@@ -145,11 +141,13 @@ Translate these {len(items)} segments to {target_lang}:
             for t in result.get("segments", []):
                 if t["id"] in seg_map:
                     text = t.get("dubbed_text", "")
+                    # Only truncate if it has 3x+ more words than reasonable
                     dur = seg_map[t["id"]]["end"] - seg_map[t["id"]]["start"]
-                    max_w = max(2, int(dur * wps))
+                    max_w = max(3, int(dur * wps))
                     words = text.split()
-                    if len(words) > max_w + 2:
-                        text = " ".join(words[:max_w])
+                    if len(words) > max_w * 2:
+                        # Gentle trim, keep the start and end meaning
+                        text = " ".join(words[:int(max_w * 1.5)])
                     seg_map[t["id"]]["dubbed_text"] = text
 
             prev_context = _build_context_from_previous(story_context, batch)
@@ -250,11 +248,12 @@ Polish these {len(items)} draft translations:
                 if t["id"] in seg_map:
                     new_text = t.get("dubbed_text", "")
                     if new_text and new_text != seg_map[t["id"]].get("dubbed_text", ""):
+                        # Only truncate at 2x budget — polish pass should expand if needed
                         dur = seg_map[t["id"]]["end"] - seg_map[t["id"]]["start"]
-                        max_w = max(2, int(dur * wps))
+                        max_w = max(3, int(dur * wps))
                         words = new_text.split()
-                        if len(words) > max_w + 2:
-                            new_text = " ".join(words[:max_w])
+                        if len(words) > max_w * 2:
+                            new_text = " ".join(words[:int(max_w * 1.5)])
                         seg_map[t["id"]]["dubbed_text"] = new_text
                         polished_count += 1
 

@@ -9,17 +9,19 @@ import os
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Words per second by language (for timing constraints in lip-sync dubbing)
+# Natural spoken speech rates — these are realistic conversation speeds, NOT slow narration
+# Translator uses these for SOFT budgets — meaning fidelity > word count
 WORDS_PER_SEC = {
-    "Hindi": 2.5, "Tamil": 2.0, "Telugu": 2.2, "Bengali": 2.3,
-    "Marathi": 2.4, "Gujarati": 2.4, "Kannada": 2.1, "Malayalam": 1.9,
-    "Nepali": 2.5, "Urdu": 2.5, "English": 3.0, "Spanish": 2.8,
-    "French": 2.7, "Portuguese": 2.6, "German": 2.5, "Japanese": 3.5,
-    "Korean": 2.8, "Arabic": 2.5, "Turkish": 2.6, "Chinese": 3.5,
+    "Hindi": 3.5, "Tamil": 3.0, "Telugu": 3.0, "Bengali": 3.2,
+    "Marathi": 3.2, "Gujarati": 3.2, "Kannada": 2.8, "Malayalam": 2.8,
+    "Nepali": 3.5, "Urdu": 3.5, "English": 3.5, "Spanish": 3.3,
+    "French": 3.2, "Portuguese": 3.1, "German": 3.0, "Japanese": 4.0,
+    "Korean": 3.5, "Arabic": 3.0, "Turkish": 3.0, "Chinese": 4.0,
 }
 
 # Language-specific translation instructions
 LANG_INSTRUCTIONS = {
-    "Hindi": "Translate to natural Hinglish (Hindi+English mix as Indians actually speak). Keep English words Indians commonly use: okay, sorry, please, time, market, phone, office, school. Write in ROMAN script (NOT Devanagari).",
+    "Hindi": "Translate to natural, conversational Hindi as Indians speak in daily life. Full Hindi sentences, not broken fragments. Keep English words Indians naturally use: okay, sorry, please, time, phone, office, school. Write in ROMAN script (NOT Devanagari). Do NOT leave English names/events in English — use phonetic Hindi: Caesar → Seizar, Rome → Room.",
     "Tamil": "Translate to natural spoken Tamil (Tanglish where natural). Roman script only.",
     "Telugu": "Translate to natural spoken Telugu. Roman script only.",
     "Bengali": "Translate to natural spoken Bengali. Roman script only.",
